@@ -344,11 +344,24 @@ def preprocess_data(df, material):
 
 # ===================== 4. VMD 分解 =====================
 def vmd_decompose_full(signal, K=VMD_K):
-    """对完整需求量序列进行VMD分解，返回所有IMF和残差/模态索引"""
+    """对需求量序列进行VMD分解，返回所有IMF和残差/模态索引"""
     u, u_hat, omega = VMD(signal, VMD_ALPHA, 0, K, 0, 1, 1e-7)
     residual_idx = int(np.argmin(np.abs(omega[-1])))
     modal_indices = [i for i in range(K) if i != residual_idx]
     return u, u_hat, omega, residual_idx, modal_indices
+
+
+def extrapolate_imfs(imfs_train, n_test, method='persistence'):
+    """将训练集IMF外推至测试集长度（避免Look-Ahead Bias）
+
+    VMD 仅对训练集需求量进行分解，测试期IMF通过外推获得：
+    - persistence: 重复训练集最后一个IMF值（朴素但无数据泄露）
+    - 这确保了模型在测试期的预测只依赖训练期已知信息
+    """
+    if method == 'persistence':
+        last = imfs_train[-1]  # (K,)
+        return np.tile(last, (n_test, 1))
+    raise ValueError(f"Unknown method: {method}")
 
 
 # ===================== 5. LSTM 模型定义 =====================
@@ -473,14 +486,14 @@ def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, dem
 
 # ===================== 7. 模型二: VMD-CatBoost =====================
 def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                     demand_full, material, demand_scaler):
-    """模型二: VMD分解需求量 → 全部分量+4因子 → CatBoost端到端预测"""
-    # VMD 分解完整需求量序列
-    u, _, omega, _, _ = vmd_decompose_full(demand_full)
+                     material, demand_scaler):
+    """模型二: VMD(仅训练集) → IMF外推 → 全部分量+4因子 → CatBoost"""
+    # VMD 仅对训练集需求量进行分解，避免 Look-Ahead Bias
+    u, _, omega, _, _ = vmd_decompose_full(y_train)  # (5, 24)
 
-    # 分割 IMFs 为 train/test
-    imfs_train = u[:, :24].T   # (24, 5)
-    imfs_test = u[:, 24:].T    # (12, 5)
+    imfs_train = u.T   # (24, 5)
+    # 测试期 IMF 通过 persistence 外推（无未来数据泄露）
+    imfs_test = extrapolate_imfs(imfs_train, len(y_test))
 
     # 拼接特征: IMFs + 4个影响因子
     X_train_full = np.column_stack([imfs_train, X_train_factors])
@@ -507,18 +520,19 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
 
 # ===================== 8. 模型三: VMD-LSTM-CatBoost =====================
 def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                          demand_full, material, demand_scaler):
-    """模型三: VMD → 残差多特征LSTM + 4模态单特征LSTM → CatBoost融合"""
+                          material, demand_scaler):
+    """模型三: VMD(仅训练集) → 残差多特征LSTM + 4模态单特征LSTM → CatBoost融合"""
     seq_len = SEQ_LEN
     top4 = get_top_factors(material)
 
-    # 1. VMD 分解完整需求量
-    u, _, omega, residual_idx, modal_indices = vmd_decompose_full(demand_full)
+    # 1. VMD 仅对训练集分解，避免 Look-Ahead Bias
+    u, _, omega, residual_idx, modal_indices = vmd_decompose_full(y_train)  # (5, 24)
     logger.debug(f"    VMD分解: 残差=IMF{residual_idx+1}, 模态={[f'IMF{i+1}' for i in modal_indices]}")
 
-    # 分割IMF为train/test
-    u_train = u[:, :24]  # (5, 24)
-    u_test = u[:, 24:]   # (5, 12)
+    # 测试期 IMF 通过 persistence 外推
+    imfs_test_ext = extrapolate_imfs(u.T, len(y_test))  # (12, 5)
+    u_train = u  # (5, 24)
+    u_test = imfs_test_ext.T  # (5, 12)
 
     lstm_preds_train = []
     lstm_preds_test = []
@@ -818,7 +832,6 @@ def main():
 
             X_train_factors, y_train, X_test_factors, y_test, demand_scaler = \
                 preprocess_data(df, material)
-            demand_full_scaled = np.concatenate([y_train, y_test])
             logger.debug(f"  训练集: {len(y_train)}月, 测试集: {len(y_test)}月")
 
             all_results[material] = {}
@@ -839,7 +852,7 @@ def main():
             logger.info(f"  [4/6] 模型二: VMD-CatBoost...")
             y_pred_2, y_test_2, imp_2, omega_2, u_2, model_2 = run_vmd_catboost(
                 X_train_factors, y_train, X_test_factors, y_test,
-                demand_full_scaled, material, demand_scaler)
+                material, demand_scaler)
             metrics_2 = evaluate_model(y_test_2, y_pred_2)
             all_results[material]['VMD-CatBoost'] = {
                 'y_pred': y_pred_2, 'y_test': y_test_2, 'metrics': metrics_2}
@@ -847,14 +860,14 @@ def main():
             logger.info(f"        MSE={metrics_2['MSE']:.4f} RMSE={metrics_2['RMSE']:.4f} "
                          f"MAE={metrics_2['MAE']:.4f} R^2={metrics_2['R2']:.4f}")
 
-            # VMD 分解可视化
-            plot_vmd_decomposition(demand_full_scaled, u_2, omega_2, material)
+            # VMD 分解可视化（仅展示训练集部分）
+            plot_vmd_decomposition(y_train, u_2, omega_2, material)
 
             # --- 模型三: VMD-LSTM-CatBoost ---
             logger.info(f"  [5/6] 模型三: VMD-LSTM-CatBoost...")
             y_pred_3, y_test_3, imp_3, omega_3, u_3, model_3 = run_vmd_lstm_catboost(
                 X_train_factors, y_train, X_test_factors, y_test,
-                demand_full_scaled, material, demand_scaler)
+                material, demand_scaler)
             metrics_3 = evaluate_model(y_test_3, y_pred_3)
             all_results[material]['VMD-LSTM-CatBoost'] = {
                 'y_pred': y_pred_3, 'y_test': y_test_3, 'metrics': metrics_3}
