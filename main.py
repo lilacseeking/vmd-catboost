@@ -162,28 +162,31 @@ def _generate_all_data(months):
     np.random.seed(RANDOM_SEED)
 
     # ===== 统一因素（同一月份所有相关物资共享） =====
-    # 负荷增长量: 统一 (all 3 materials)，范围 0.00-1.00，夏季峰值最高
+    # 负荷增长量: 统一，范围 0.00-1.00，夏季峰值最高，增加随机年际波动
     summer = np.clip(np.sin(np.pi * ((t % 12) - 3) / 6), 0, 1)
-    load_growth = 0.15 + summer * 0.7 + np.random.randn(n) * 0.05
+    load_growth_base = 0.15 + summer * 0.7
+    load_growth = load_growth_base + np.random.randn(n) * 0.08 + np.sin(np.arange(n) * 0.15) * 0.05
     load_growth = np.clip(np.round(load_growth, 3), 0, 1)
 
-    # 雷击: 统一 (all 3 materials)，范围 0.00-1.00 分，5-9月峰值最高
+    # 雷击: 统一，范围 0.00-1.00 分，5-9月峰值最高，增加过渡月份平滑值
     in_lightning = np.isin(t % 12, [4, 5, 6, 7, 8])
     lightning_count = np.where(in_lightning,
                                np.random.uniform(0.3, 1.0, n),
-                               np.random.uniform(0, 0.3, n))
+                               np.random.uniform(0, 0.4, n))  # 过渡月有低速值
     lightning_count = np.clip(np.round(lightning_count, 3), 0, 1)
 
-    # 台风: 二进制——仅 2023-07(索引18) 和 2024-08(索引31) 为 1
-    typhoon_count = np.zeros(n)
-    typhoon_count[18] = 1
-    typhoon_count[31] = 1
+    # 台风: 连续值(台风影响天数)，6-10月台风季，范围 0.00-1.00
+    in_typhoon = np.isin(t % 12, [5, 6, 7, 8, 9])
+    typhoon_seasonal = np.where(in_typhoon,
+                                np.random.uniform(0.2, 1.0, n),
+                                np.random.uniform(0, 0.15, n))
+    typhoon_count = np.clip(np.round(typhoon_seasonal + np.random.randn(n) * 0.1, 3), 0, 1)
 
-    # 暴雨: 统一 (all 3 materials)，范围 0.00-1.00 分，3-8月暴雨集中期较高
+    # 暴雨: 统一，范围 0.00-1.00 分，3-8月暴雨集中期较高
     in_rainstorm = np.isin(t % 12, [2, 3, 4, 5, 6, 7])
     rainstorm_count = np.where(in_rainstorm,
                                np.random.uniform(0.3, 1.0, n),
-                               np.random.uniform(0, 0.3, n))
+                               np.random.uniform(0, 0.35, n))
     rainstorm_count = np.clip(np.round(rainstorm_count, 3), 0, 1)
 
     data_dict = {}
@@ -200,9 +203,12 @@ def _generate_all_data(months):
     cable_demand = np.maximum(cable_demand, 0)
 
     cable_inv_zero = np.isin(t % 12, [0, 4, 8])
-    cable_investment = np.where(cable_inv_zero, 0,
-                                np.round(np.random.uniform(15, 25, n)))
-    cable_history = np.roll(cable_demand, 1)
+    cable_investment = np.where(cable_inv_zero,
+                                np.round(np.random.uniform(0, 8, n)),  # 零值月也有小额投资
+                                np.round(np.random.uniform(12, 28, n)))
+    # 历史需求量 = 滞后一期 + 噪声（非完全等价）
+    cable_history = np.roll(cable_demand, 1) * (1 + np.random.randn(n) * 0.08)
+    cable_history = np.clip(np.round(cable_history), 0, None)
     cable_history[0] = 0
 
     cable_cost = 4.5 + np.random.randn(n) * 1.2 + np.sin(2 * np.pi * t / 12) * 1.0
@@ -228,10 +234,12 @@ def _generate_all_data(months):
     trans_demand = np.maximum(trans_demand, 0)
 
     trans_inv_zero = np.isin(t % 12, [1, 5, 9])
-    trans_investment = np.where(trans_inv_zero, 0,
-                                np.round(np.random.uniform(5, 20, n)))
+    trans_investment = np.where(trans_inv_zero,
+                                np.round(np.random.uniform(0, 7, n)),
+                                np.round(np.random.uniform(5, 22, n)))
 
-    trans_history = np.roll(trans_demand, 1)
+    trans_history = np.roll(trans_demand, 1) * (1 + np.random.randn(n) * 0.08)
+    trans_history = np.clip(np.round(trans_history), 0, None)
     trans_history[0] = 0
 
     trans_cost = 8.0 + np.random.randn(n) * 0.8 + np.sin(2 * np.pi * t / 12) * 0.8
@@ -262,7 +270,8 @@ def _generate_all_data(months):
     arr_demand = np.maximum(arr_demand, 0)
 
     arr_inv_zero = np.isin(t % 12, [0, 3, 7])
-    arr_investment = np.where(arr_inv_zero, 0,
+    arr_investment = np.where(arr_inv_zero,
+                              np.round(np.random.uniform(5, 30, n)),
                               np.round(np.random.uniform(50, 150, n)))
 
     data_dict['arrester'] = pd.DataFrame({
