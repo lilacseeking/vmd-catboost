@@ -319,10 +319,8 @@ def preprocess_data(df, material):
     # 保留原始尺度（反归一化用）
     demand_scaler = MinMaxScaler()
     demand_scaler.fit(df[['demand']].values.astype(np.float64))
-    y_train_orig = df['demand'].values[:24].copy()
-    y_test_orig = df['demand'].values[24:].copy()
 
-    return X_train_factors, y_train, X_test_factors, y_test, scaler, demand_scaler
+    return X_train_factors, y_train, X_test_factors, y_test, demand_scaler
 
 
 # ===================== 4. VMD 分解 =====================
@@ -417,7 +415,10 @@ def train_lstm_model(model, X, y, epochs=200, patience=30, lr=0.01):
         else:
             counter += 1
             if counter >= patience:
+                logger.debug(f"  [LSTM收敛] epoch={epoch+1}, best_loss={best_loss:.6f}")
                 break
+    else:
+        logger.debug(f"  [LSTM收敛] epoch={epochs}(max), best_loss={best_loss:.6f}")
 
     model.load_state_dict(best_state)
     model.eval()
@@ -663,17 +664,19 @@ def plot_vmd_decomposition(demand_full, u, omega, material):
 
 
 def plot_feature_importance(importance_dict, material):
-    """特征重要性条形图（每种物资的CatBoost和VMD-CatBoost）"""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    """特征重要性条形图（每种物资的CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost）"""
+    top4 = get_top_factors(material)
+    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
 
     for ax_idx, (model_name, imp, feat_names) in enumerate([
-        ('CatBoost', importance_dict.get('catboost_imp'),
-         get_top_factors(material)),
+        ('CatBoost', importance_dict.get('catboost_imp'), top4),
         ('VMD-CatBoost', importance_dict.get('vmd_catboost_imp'),
-         [f'IMF{i+1}' for i in range(VMD_K)] + get_top_factors(material))
+         [f'IMF{i+1}' for i in range(VMD_K)] + top4),
+        ('VMD-LSTM-CatBoost', importance_dict.get('vmd_lstm_catboost_imp'),
+         ['LSTM残差'] + [f'LSTM模态{i+1}' for i in range(VMD_K - 1)] + top4),
     ]):
         ax = axes[ax_idx]
-        if imp is not None:
+        if imp is not None and len(imp) > 0:
             colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(imp)))
             ax.barh(range(len(imp)), imp, color=colors, edgecolor='navy', alpha=0.85)
             ax.set_yticks(range(len(imp)))
@@ -788,7 +791,7 @@ def main():
             top4 = get_top_factors(material)
             logger.info(f"  Top-4 影响因子: {top4}")
 
-            X_train_factors, y_train, X_test_factors, y_test, scaler, demand_scaler = \
+            X_train_factors, y_train, X_test_factors, y_test, demand_scaler = \
                 preprocess_data(df, material)
             demand_full_scaled = np.concatenate([y_train, y_test])
             logger.debug(f"  训练集: {len(y_train)}月, 测试集: {len(y_test)}月")
