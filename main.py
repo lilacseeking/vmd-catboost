@@ -190,12 +190,13 @@ def _generate_all_data(months):
 
     # ====================================================================
     # 10KV电缆
-    # 需求: 冬季(12-2月)为0；非0时 15-25 (10千米)
+    # 需求: 冬季(12-2月)为0；非0时 10-30 (10千米)，增大波动性
     # 因子: investment(#1), history_demand(#2), load_growth(#3), equipment_cost(#4)
     # ====================================================================
     cable_low = np.isin(t % 12, [0, 1, 11])
-    cable_raw = 20 + np.sin(2 * np.pi * t / 12) * 3 + 0.3 * t + np.random.randn(n) * 1.5
-    cable_demand = np.where(cable_low, 0, np.clip(np.round(cable_raw), 15, 25))
+    cable_noise = np.random.randn(n) * 5 + np.sin(np.arange(n) * 0.3) * 2  # 年际波动
+    cable_raw = 20 + np.sin(2 * np.pi * t / 12) * 4 + 0.2 * t + cable_noise
+    cable_demand = np.where(cable_low, 0, np.clip(np.round(cable_raw), 10, 30))
     cable_demand = np.maximum(cable_demand, 0)
 
     cable_inv_zero = np.isin(t % 12, [0, 4, 8])
@@ -247,12 +248,17 @@ def _generate_all_data(months):
 
     # ====================================================================
     # 10kv交流避雷器
-    # 需求: 干季(11-3月)为0；雨季 60-100 台
+    # 需求: 干季(11-3月)为0；雨季双峰: 5月(雷雨季开始)+8月(台风+雷暴高发)
     # 因子: lightning_count(#1), typhoon_count(#2), rainstorm_count(#3), load_growth(#4)
     # ====================================================================
     arr_low = np.isin(t % 12, [0, 1, 2, 10, 11])
-    arr_raw = 80 + np.sin(2 * np.pi * t / 12 + 1) * 12 + 0.08 * t + np.random.randn(n) * 3
-    arr_demand = np.where(arr_low, 0, np.clip(np.round(arr_raw), 60, 100))
+    # 双高斯峰结构: 5月(μ=4)和8月(μ=7)
+    month_in_year = t % 12
+    peak_may = np.exp(-0.5 * ((month_in_year - 4) / 1.2) ** 2)  # 5月 峰值
+    peak_aug = np.exp(-0.5 * ((month_in_year - 7) / 1.0) ** 2)  # 8月 峰值(更高)
+    seasonal_dual = peak_may * 18 + peak_aug * 22  # 8月峰值高于5月
+    arr_raw = 70 + seasonal_dual + 0.08 * t + np.random.randn(n) * 4
+    arr_demand = np.where(arr_low, 0, np.clip(np.round(arr_raw), 55, 105))
     arr_demand = np.maximum(arr_demand, 0)
 
     arr_inv_zero = np.isin(t % 12, [0, 3, 7])
