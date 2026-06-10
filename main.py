@@ -762,6 +762,7 @@ def plot_prediction_comparison(all_results, material):
     months = pd.date_range('2024-01-01', periods=12, freq='MS')
     colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-LSTM-CatBoost': '#FF5722', 'VMD-LSTM': '#795548', 'VMD-SVR': '#9C27B0'}
     markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-LSTM-CatBoost': 'D', 'VMD-LSTM': 'v', 'VMD-SVR': 's'}
+    y_units = {'cable': '(10千米)', 'transformer': '(套)', 'arrester': '(台)'}
 
     results = all_results[material]
     test_len = len(results['CatBoost']['y_test'])
@@ -778,9 +779,8 @@ def plot_prediction_comparison(all_results, material):
                     linestyle='solid', label=model_name,
                     markersize=4, alpha=0.85)
 
-    ax.set_title(f'{MATERIAL_LABELS[material]}', fontsize=13, fontweight='bold')
     ax.set_xlabel('日期')
-    ax.set_ylabel(f'{MATERIAL_LABELS[material]}需求量')
+    ax.set_ylabel(f'{MATERIAL_LABELS[material]}需求量{y_units[material]}')
     ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(1.02, 1), framealpha=0.9)
     ax.tick_params(axis='x', rotation=30)
     ax.grid(False)
