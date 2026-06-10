@@ -1,7 +1,6 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
 *.egg-info/
 dist/
 build/
@@ -12,14 +11,27 @@ venv/
 
 # IDE
 .idea/
-idea/
 .vscode/
-*.swp
-*.swo
 
-# Project outputs
-catboost_info/
+# Outputs (generated at runtime)
+outputs/figures/
+outputs/logs/
+
+# Models (large binary files)
+models/
+
+# Data (generated at first run)
+inputs/data/
 
 # OS
-Thumbs.db
 .DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# CatBoost
+catboost_info/
+
+# Project files
+*.docx

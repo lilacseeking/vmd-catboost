@@ -74,22 +74,21 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'WenQuanYi Micro Hei', 'Noto Sans C
 plt.rcParams['axes.unicode_minus'] = False
 
 # 抑制底层 C 扩展在字体回调中抛出的 "Exception ignored" 噪音
+# 当 matplotlib Agg 后端渲染文字时，尝试读取某些受限制的系统字体文件
+# 会触发 PermissionError。fontmanager 重建后基本不会再发生，此处作为兜底。
 @contextmanager
 def suppress_font_stderr():
-    """临时重定向 stderr，过滤字体权限错误"""
-    import ctypes
     if sys.platform != 'win32':
         yield
         return
     _orig_stderr = sys.stderr
-    class _FilteredStderr(io.StringIO):
+    class _Filter(io.StringIO):
         def write(self, s):
-            if 'read_from_file_callback' in s or 'Permission denied' in s or 'font.set_text' in s:
-                return 0
-            return _orig_stderr.write(s)
-        def flush(self):
-            _orig_stderr.flush()
-    sys.stderr = _FilteredStderr()
+            if isinstance(s, str) and ('Permission' in s or 'read_from_file_callback' in s):
+                return len(s)  # 静默吞掉该条消息
+            _orig_stderr.write(s)
+            return len(s) if isinstance(s, str) else 0
+    sys.stderr = _Filter()
     try:
         yield
     finally:
