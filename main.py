@@ -102,10 +102,11 @@ if sys.platform == 'win32':
 MATERIALS = ['cable', 'transformer', 'arrester']
 MATERIAL_LABELS = {'cable': '10KV电缆', 'transformer': '柱上变压器台成套设备', 'arrester': '10kv交流避雷器'}
 FACTOR_NAMES = ['load_growth', 'investment', 'history_demand', 'equipment_cost',
-                'typhoon_count', 'lightning_count']
+                'typhoon_count', 'lightning_count', 'rainstorm_count']
 FACTOR_LABELS = {'load_growth': '负荷增长量(分)', 'investment': '工程投资量',
                  'history_demand': '历史需求量', 'equipment_cost': '设备进价成本(万元)',
-                 'typhoon_count': '台风(分)', 'lightning_count': '雷击(分)'}
+                 'typhoon_count': '台风(分)', 'lightning_count': '雷击(分)',
+                 'rainstorm_count': '暴雨(分)'}
 VMD_K = 5
 VMD_ALPHA = 2000
 SEQ_LEN = 6
@@ -149,6 +150,7 @@ COLUMN_CN = {
     'equipment_cost': '设备进价成本(万元)',
     'typhoon_count': '台风(分)',
     'lightning_count': '雷击(分)',
+    'rainstorm_count': '暴雨(分)',
 }
 COLUMN_EN = {v: k for k, v in COLUMN_CN.items()}
 
@@ -177,12 +179,19 @@ def _generate_all_data(months):
     typhoon_count[18] = 1
     typhoon_count[31] = 1
 
+    # 暴雨: 统一 (all 3 materials)，范围 0.00-1.00 分，3-8月暴雨集中期较高
+    in_rainstorm = np.isin(t % 12, [2, 3, 4, 5, 6, 7])
+    rainstorm_count = np.where(in_rainstorm,
+                               np.random.uniform(0.3, 1.0, n),
+                               np.random.uniform(0, 0.3, n))
+    rainstorm_count = np.clip(np.round(rainstorm_count, 3), 0, 1)
+
     data_dict = {}
 
     # ====================================================================
     # 10KV电缆
     # 需求: 冬季(12-2月)为0；非0时 15-25 (10千米)
-    # 因子: investment(#1), load_growth(#2), equipment_cost(#3), lightning_count(#4)
+    # 因子: investment(#1), history_demand(#2), load_growth(#3), equipment_cost(#4)
     # ====================================================================
     cable_low = np.isin(t % 12, [0, 1, 11])
     cable_raw = 20 + np.sin(2 * np.pi * t / 12) * 3 + 0.3 * t + np.random.randn(n) * 1.5
@@ -192,6 +201,8 @@ def _generate_all_data(months):
     cable_inv_zero = np.isin(t % 12, [0, 4, 8])
     cable_investment = np.where(cable_inv_zero, 0,
                                 np.round(np.random.uniform(15, 25, n)))
+    cable_history = np.roll(cable_demand, 1)
+    cable_history[0] = 0
 
     cable_cost = 4.5 + np.random.randn(n) * 1.2 + np.sin(2 * np.pi * t / 12) * 1.0
     cable_cost = np.clip(np.round(cable_cost, 1), 2, 7)
@@ -201,8 +212,8 @@ def _generate_all_data(months):
         'demand': cable_demand,
         'load_growth': load_growth,
         'investment': cable_investment,
+        'history_demand': cable_history,
         'equipment_cost': cable_cost,
-        'lightning_count': lightning_count,
     })
 
     # ====================================================================
@@ -237,7 +248,7 @@ def _generate_all_data(months):
     # ====================================================================
     # 10kv交流避雷器
     # 需求: 干季(11-3月)为0；雨季 60-100 台
-    # 因子: investment(#1), load_growth(#2), lightning_count(#3), typhoon_count(#4)
+    # 因子: lightning_count(#1), typhoon_count(#2), rainstorm_count(#3), load_growth(#4)
     # ====================================================================
     arr_low = np.isin(t % 12, [0, 1, 2, 10, 11])
     arr_raw = 80 + np.sin(2 * np.pi * t / 12 + 1) * 12 + 0.08 * t + np.random.randn(n) * 3
@@ -255,6 +266,7 @@ def _generate_all_data(months):
         'investment': arr_investment,
         'lightning_count': lightning_count,
         'typhoon_count': typhoon_count,
+        'rainstorm_count': rainstorm_count,
     })
 
     return data_dict
@@ -270,6 +282,13 @@ def load_or_generate_data():
             df = pd.read_excel(DATA_FILE, sheet_name=sheet)
             df.rename(columns=COLUMN_EN, inplace=True)
             df['date'] = pd.to_datetime(df['date'])
+            # 验证所需因子列是否存在（top-4 或 FACTOR_NAMES 变更后可能缺失）
+            required = ['demand'] + get_top_factors(material)
+            missing = [c for c in required if c not in df.columns]
+            if missing:
+                logger.warning(f"  Sheet[{sheet}] 缺少列 {missing}，数据文件版本过旧，删除并重新生成...")
+                os.remove(DATA_FILE)
+                return load_or_generate_data()
             data_dict[material] = df
             logger.info(f"  Sheet[{sheet}]: {len(df)} 条, demand范围=[{df['demand'].min():.2f}, {df['demand'].max():.2f}]")
         return data_dict
@@ -291,11 +310,11 @@ def load_or_generate_data():
 
 # ===================== 2. Top-4 影响因子（预确定） =====================
 def get_top_factors(material):
-    """返回 top-4 影响因子，按排名顺序"""
+    """返回 top-4 影响因子，按排名顺序（与论文斯皮尔曼分析一致）"""
     mapping = {
-        'cable':        ['investment', 'load_growth', 'equipment_cost', 'lightning_count'],
+        'cable':        ['investment', 'history_demand', 'load_growth', 'equipment_cost'],
         'transformer':  ['load_growth', 'investment', 'history_demand', 'equipment_cost'],
-        'arrester':     ['investment', 'load_growth', 'lightning_count', 'typhoon_count'],
+        'arrester':     ['lightning_count', 'typhoon_count', 'rainstorm_count', 'load_growth'],
     }
     return mapping[material]
 
