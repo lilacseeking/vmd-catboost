@@ -593,6 +593,7 @@ def plot_prediction_comparison(all_results):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     months = pd.date_range('2024-01-01', periods=12, freq='MS')
     colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-LSTM-CatBoost': '#FF5722'}
+    markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-LSTM-CatBoost': 'D'}
     y_labels = {'cable': '需求量 (10千米)', 'transformer': '需求量 (套)', 'arrester': '需求量 (台)'}
 
     for ax_idx, material in enumerate(MATERIALS):
@@ -605,19 +606,23 @@ def plot_prediction_comparison(all_results):
         ax.plot(x, results['CatBoost']['y_test'][:len(x)], color='black', marker='o',
                 linestyle='solid', label='真实值', markersize=5, linewidth=2)
 
+        # 收集各模型 R² 用于标题
+        r2_parts = []
         for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']:
             if model_name in results:
                 pred = results[model_name]['y_pred']
                 pred_x = months[:len(pred)]
-                ax.plot(pred_x, pred, color=colors[model_name], marker='s',
-                        linestyle='solid',
-                        label=f"{model_name}(R²={results[model_name]['metrics']['R2']:.3f})",
+                ax.plot(pred_x, pred, color=colors[model_name], marker=markers[model_name],
+                        linestyle='solid', label=model_name,
                         markersize=4, alpha=0.85)
+                r2 = results[model_name]['metrics']['R2']
+                r2_parts.append(f'{model_name} R²={r2:.3f}')
 
-        ax.set_title(f'{MATERIAL_LABELS[material]}', fontsize=13, fontweight='bold')
+        title = f'{MATERIAL_LABELS[material]}\n({", ".join(r2_parts)})'
+        ax.set_title(title, fontsize=10, fontweight='bold')
         ax.set_xlabel('日期')
         ax.set_ylabel(y_labels[material])
-        ax.legend(fontsize=7, loc='best')
+        ax.legend(fontsize=7, loc='upper right')
         ax.tick_params(axis='x', rotation=30)
         ax.grid(False)
         ax.spines['top'].set_visible(False)
