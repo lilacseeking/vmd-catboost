@@ -455,8 +455,11 @@ def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, dem
         loss_function='RMSE', early_stopping_rounds=30,
         random_seed=RANDOM_SEED, verbose=0
     )
-    model.fit(X_train_factors, y_train,
-              eval_set=(X_train_factors[-6:], y_train[-6:]))
+    # 时序验证集: 前18月训练, 后6月(第19-24月)作为早停验证
+    n_val = min(6, len(y_train) // 4)
+    X_tr, X_val = X_train_factors[:-n_val], X_train_factors[-n_val:]
+    y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
+    model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
 
     y_pred = model.predict(X_test_factors)
     importance = model.get_feature_importance()
@@ -488,8 +491,10 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
         loss_function='RMSE', early_stopping_rounds=30,
         random_seed=RANDOM_SEED, verbose=0
     )
-    model.fit(X_train_full, y_train,
-              eval_set=(X_train_full[-6:], y_train[-6:]))
+    n_val = min(6, len(y_train) // 4)
+    X_tr, X_val = X_train_full[:-n_val], X_train_full[-n_val:]
+    y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
+    model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
 
     y_pred = model.predict(X_test_full)
     importance = model.get_feature_importance()
@@ -580,8 +585,9 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         loss_function='RMSE', early_stopping_rounds=20,
         random_seed=RANDOM_SEED, verbose=0
     )
+    n_fusion_val = min(6, len(y_train[seq_len:]) // 3)
     fusion_model.fit(fusion_train, y_train[seq_len:],
-                     eval_set=(fusion_train[-3:], y_train[seq_len:][-3:]))
+                     eval_set=(fusion_train[-n_fusion_val:], y_train[seq_len:][-n_fusion_val:]))
 
     y_pred_fusion = fusion_model.predict(fusion_test)
     importance = fusion_model.get_feature_importance()
