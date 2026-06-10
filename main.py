@@ -756,51 +756,42 @@ def evaluate_model(y_true, y_pred):
 
 
 # ===================== 10. 可视化 =====================
-def plot_prediction_comparison(all_results):
-    """预测对比曲线：每种物资一张图，含三模型预测 vs 真实值"""
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+def plot_prediction_comparison(all_results, material):
+    """预测对比曲线：单种物资独立成图，三模型预测 vs 真实值"""
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5.5))
     months = pd.date_range('2024-01-01', periods=12, freq='MS')
     colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-LSTM-CatBoost': '#FF5722', 'VMD-LSTM': '#795548', 'VMD-SVR': '#9C27B0'}
     markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-LSTM-CatBoost': 'D', 'VMD-LSTM': 'v', 'VMD-SVR': 's'}
-    y_labels = {'cable': '需求量 (10千米)', 'transformer': '需求量 (套)', 'arrester': '需求量 (台)'}
 
-    for ax_idx, material in enumerate(MATERIALS):
-        ax = axes[ax_idx]
-        results = all_results[material]
-        # 对齐：模型三的测试集可能短于12个月（LSTM窗口效应）
-        test_len = len(results['CatBoost']['y_test'])
-        x = months[:test_len]
+    results = all_results[material]
+    test_len = len(results['CatBoost']['y_test'])
+    x = months[:test_len]
 
-        ax.plot(x, results['CatBoost']['y_test'][:len(x)], color='black', marker='o',
-                linestyle='solid', label='真实值', markersize=5, linewidth=2)
+    ax.plot(x, results['CatBoost']['y_test'][:len(x)], color='black', marker='o',
+            linestyle='solid', label='真实值', markersize=5, linewidth=2)
 
-        # 收集各模型 R² 用于标题
-        r2_parts = []
-        for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM', 'VMD-SVR']:
-            if model_name in results:
-                pred = results[model_name]['y_pred']
-                pred_x = months[:len(pred)]
-                ax.plot(pred_x, pred, color=colors[model_name], marker=markers[model_name],
-                        linestyle='solid', label=model_name,
-                        markersize=4, alpha=0.85)
-                r2 = results[model_name]['metrics']['R2']
-                r2_parts.append(f'{model_name} R²={r2:.3f}')
+    for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM', 'VMD-SVR']:
+        if model_name in results:
+            pred = results[model_name]['y_pred']
+            pred_x = months[:len(pred)]
+            ax.plot(pred_x, pred, color=colors[model_name], marker=markers[model_name],
+                    linestyle='solid', label=model_name,
+                    markersize=4, alpha=0.85)
 
-        title = f'{MATERIAL_LABELS[material]}\n({", ".join(r2_parts)})'
-        ax.set_title(title, fontsize=10, fontweight='bold')
-        ax.set_xlabel('日期')
-        ax.set_ylabel(y_labels[material])
-        ax.legend(fontsize=7, loc='upper right')
-        ax.tick_params(axis='x', rotation=30)
-        ax.grid(False)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
+    ax.set_title(f'{MATERIAL_LABELS[material]}', fontsize=13, fontweight='bold')
+    ax.set_xlabel('日期')
+    ax.set_ylabel(f'{MATERIAL_LABELS[material]}需求量')
+    ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(1.02, 1), framealpha=0.9)
+    ax.tick_params(axis='x', rotation=30)
+    ax.grid(False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
 
     plt.tight_layout()
-    path = os.path.join(OUTPUT_DIR, 'prediction_comparison.png')
+    path = os.path.join(OUTPUT_DIR, f'prediction_comparison_{material}.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
-    logger.info(f"  [图表] 预测对比图 → {path}")
+    logger.info(f"  [图表] 预测对比图({material}) → {path}")
 
 
 def plot_vmd_decomposition(demand_full, u, omega, material):
@@ -1052,8 +1043,9 @@ def main():
             json.dump(metrics_json, f, ensure_ascii=False, indent=2)
         logger.info(f"  [文件] 指标JSON → {json_path}")
 
-        # 预测对比图
-        plot_prediction_comparison(all_results)
+        # 预测对比图（每种物资独立成图）
+        for material in MATERIALS:
+            plot_prediction_comparison(all_results, material)
 
         # 指标对比柱状图
         plot_metrics_comparison(all_metrics)
