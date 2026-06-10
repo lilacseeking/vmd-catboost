@@ -475,11 +475,15 @@ def train_lstm_model(model, X, y, epochs=200, patience=30, lr=0.01):
 # ===================== 6. 模型一: CatBoost =====================
 def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler):
     """模型一: 直接使用4个影响因子，CatBoost回归预测"""
-    logger.info("  [CatBoost超参数] iterations=500, learning_rate=0.03, depth=4, l2_leaf_reg=5, "
+    # 避雷器数据含大量零值(41.7%), 需要更强拟合能力
+    iters = 800 if material == 'arrester' else 500
+    depth = 6 if material == 'arrester' else 4
+    lr = 0.02 if material == 'arrester' else 0.03
+    logger.info(f"  [CatBoost超参数] iterations={iters}, learning_rate={lr}, depth={depth}, l2_leaf_reg=5, "
                  f"loss_function=RMSE, early_stopping_rounds=30, random_seed={RANDOM_SEED} | "
                  f"输入特征数(input_features)={X_train_factors.shape[1]}")
     model = CatBoostRegressor(
-        iterations=500, learning_rate=0.03, depth=4, l2_leaf_reg=5,
+        iterations=iters, learning_rate=lr, depth=depth, l2_leaf_reg=5,
         loss_function='RMSE', early_stopping_rounds=30,
         random_seed=RANDOM_SEED, verbose=0
     )
