@@ -59,9 +59,9 @@
 | F2 | 工程投资量 | `investment` | 万元 | 连续数值 |
 | F3 | 历史需求量 | `history_demand` | 件/吨 | 连续数值（滞后特征） |
 | F4 | 设备进价成本 | `equipment_cost` | 元 | 连续数值 |
-| F5 | 台风每月次数 | `typhoon_count` | 次/月 | 离散数值 |
-| F6 | 雷击每月次数 | `lightning_count` | 次/月 | 离散数值 |
-| F7 | 暴雨每月次数 | `rainstorm_count` | 次/月 | 离散数值 |
+| F5 | 台风每月影响天数 | `typhoon_count` | 天/月(归一化) | 连续数值 |
+| F6 | 雷击每月次数 | `lightning_count` | 次/月(归一化) | 连续数值 |
+| F7 | 暴雨每月次数 | `rainstorm_count` | 次/月(归一化) | 连续数值 |
 
 ### 2.3 特征筛选（斯皮尔曼相关性）
 
@@ -199,7 +199,10 @@ def run_catboost(X_train, y_train, X_test, y_test, material_name):
         l2_leaf_reg=5, loss_function='RMSE',
         early_stopping_rounds=30, random_seed=42, verbose=0
     )
-    model.fit(X_train, y_train, eval_set=(X_test, y_test))
+    # 时序验证集: 前18月训练, 后6月验证
+    n_val = 6
+    model.fit(X_train[:-n_val], y_train[:-n_val],
+              eval_set=(X_train[-n_val:], y_train[-n_val:]))
     y_pred = model.predict(X_test)
     importance = model.get_feature_importance()
     return y_pred, importance, model
@@ -225,18 +228,23 @@ def run_catboost(X_train, y_train, X_test, y_test, material_name):
 def run_vmd_catboost(y_train, y_test, X_train_factors, X_test_factors,
                      material_name):
     """模型二：VMD分解后 CatBoost 预测"""
-    # 1. VMD 分解（在完整36月需求量序列上，再分割train/test）
+    # 1. VMD 分解（仅对训练集需求量，避免 Look-Ahead Bias）
     u, _, _ = VMD(y_train, alpha=2000, tau=0, K=5, DC=0, init=1, tol=1e-7)
-    imfs_train = u.T  # (n_train, 5)
+    imfs_train = u.T  # (24, 5)
+    # 测试期 IMF 通过 persistence 外推
+    imfs_test = extrapolate_imfs(imfs_train, len(y_test))
 
     # 2. 训练 CatBoost
     X_train_full = np.column_stack([imfs_train, X_train_factors])
+    X_test_full = np.column_stack([imfs_test, X_test_factors])
     model = CatBoostRegressor(
         iterations=500, learning_rate=0.03, depth=4,
         l2_leaf_reg=5, loss_function='RMSE',
         early_stopping_rounds=30, random_seed=42, verbose=0
     )
-    model.fit(X_train_full, y_train, eval_set=(X_test_full, y_test))
+    n_val = 6
+    model.fit(X_train_full[:-n_val], y_train[:-n_val],
+              eval_set=(X_train_full[-n_val:], y_train[-n_val:]))
     # ... 预测和评估
 ```
 
@@ -276,7 +284,7 @@ Step 3: CatBoost融合
 def run_vmd_lstm_catboost(y_train, y_test, X_train_factors, X_test_factors,
                           material_name):
     """模型三：VMD-LSTM-CatBoost 复合预测"""
-    # 1. VMD分解
+    # 1. VMD分解（仅对训练集，避免 Look-Ahead Bias）
     u, _, omega = VMD(y_train, alpha=2000, tau=0, K=5, DC=0, init=1, tol=1e-7)
 
     # 2. 区分残差 vs 模态（按中心频率）
@@ -489,6 +497,7 @@ def get_top_factors(material_name):
         'transformer':  ['load_growth', 'investment', 'history_demand', 'equipment_cost'],
         'arrester':     ['lightning_count', 'typhoon_count', 'rainstorm_count', 'load_growth'],
     }
+    # 注: 避雷器作为防雷设备，top-4 以气象因子为主
     return mapping[material_name]
 ```
 
@@ -624,7 +633,7 @@ def evaluate_model(y_true, y_pred):
 |------|---------|------|------|------|
 | F1 | 预测对比曲线 | `plot_prediction_comparison()` | 1张 | 1张图含3个子图，每子图一种物资，三模型预测 vs 真实值同轴对比 |
 | F2 | VMD分解波形 | `plot_vmd_decomposition()` | 3张 | 每物资1张，展示原始信号 + 5个IMF分量（含中心频率标注） |
-| F3 | 特征重要性 | `plot_feature_importance()` | 3张 | 每物资1张含2子图（CatBoost / VMD-CatBoost），含VMD-LSTM-CatBoost重要性 |
+| F3 | 特征重要性 | `plot_feature_importance()` | 3张 | 每物资1张含3子图（CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost） |
 | F4 | 模型指标对比 | `plot_metrics_comparison()` | 1张 | 2×2子图：MSE/RMSE/MAE/R² 分组柱状图，含数值标注 |
 | F5 | 评估汇总表 | `print_metrics_table()` | 控制台 | 控制台打印格式化的指标对比表 |
 | F6 | 指标JSON | `json.dump()` | 1文件 | `metrics_summary.json` 保存所有评估指标 |
@@ -646,10 +655,13 @@ def evaluate_model(y_true, y_pred):
 
 ### 8.2 模型性能预期排序
 
+> **说明**: 由于训练样本仅 24 个月（小样本），LSTM 复杂度较高可能无法充分发挥优势。
+> 实际运行中 VMD-CatBoost（模型二）在多数物资上可能优于 VMD-LSTM-CatBoost（模型三）。
+
 ```
-模型三 (VMD-LSTM-CatBoost) > 模型二 (VMD-CatBoost) > 模型一 (CatBoost)
-                ↑                        ↑                    ↑
-           最高精度                  中等精度              基线模型
+VMD-CatBoost ≈ VMD-LSTM-CatBoost > CatBoost
+       ↑                ↑              ↑
+    端到端高效      消融验证      基线模型
 ```
 
 ### 8.3 功能验收清单
