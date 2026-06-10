@@ -1,0 +1,62 @@
+{
+  "cable": {
+    "CatBoost": {
+      "MSE": 74.3286,
+      "RMSE": 8.6214,
+      "MAE": 6.2632,
+      "R2": 0.3657
+    },
+    "VMD-CatBoost": {
+      "MSE": 7.318,
+      "RMSE": 2.7052,
+      "MAE": 2.5062,
+      "R2": 0.9376
+    },
+    "VMD-LSTM-CatBoost": {
+      "MSE": 10.6988,
+      "RMSE": 3.2709,
+      "MAE": 2.9721,
+      "R2": 0.9087
+    }
+  },
+  "transformer": {
+    "CatBoost": {
+      "MSE": 23.0566,
+      "RMSE": 4.8017,
+      "MAE": 3.6871,
+      "R2": 0.4023
+    },
+    "VMD-CatBoost": {
+      "MSE": 6.8965,
+      "RMSE": 2.6261,
+      "MAE": 2.3407,
+      "R2": 0.8212
+    },
+    "VMD-LSTM-CatBoost": {
+      "MSE": 7.7935,
+      "RMSE": 2.7917,
+      "MAE": 2.4243,
+      "R2": 0.798
+    }
+  },
+  "arrester": {
+    "CatBoost": {
+      "MSE": 1812.5461,
+      "RMSE": 42.574,
+      "MAE": 26.6082,
+      "R2": -0.2186
+    },
+    "VMD-CatBoost": {
+      "MSE": 65.3546,
+      "RMSE": 8.0842,
+      "MAE": 7.1017,
+      "R2": 0.9561
+    },
+    "VMD-LSTM-CatBoost": {
+      "MSE": 68.8283,
+      "RMSE": 8.2963,
+      "MAE": 7.4688,
+      "R2": 0.9537
+    }
+  }
+}

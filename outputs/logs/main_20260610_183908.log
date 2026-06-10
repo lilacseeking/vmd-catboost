@@ -1,0 +1,85 @@
+18:39:08 | INFO    | ======================================================================
+18:39:08 | INFO    |   配电网物资需求预测 —— VMD-CatBoost 模型对比实验
+18:39:08 | INFO    |   物资: 10KV电缆 / 柱上变压器台成套设备 / 10kv交流避雷器
+18:39:08 | INFO    |   模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost
+18:39:08 | INFO    | ======================================================================
+18:39:08 | INFO    |   日志文件: outputs/logs\main_20260610_183908.log
+18:39:08 | INFO    | [1/6] 加载数据...
+18:39:08 | INFO    | 读取已有数据文件: inputs/data\data.xlsx
+18:39:08 | INFO    |   Sheet[10KV电缆]: 36 条, demand范围=[20.99, 47.35]
+18:39:08 | INFO    |   Sheet[柱上变压器台成套设备]: 36 条, demand范围=[14.10, 33.18]
+18:39:08 | INFO    |   Sheet[10kv交流避雷器]: 36 条, demand范围=[1.00, 26.27]
+18:39:08 | INFO    | 
+18:39:08 | INFO    | [2/6] 处理 10KV电缆 (cable)...
+18:39:08 | INFO    |   Top-4 影响因子: ['investment', 'history_demand', 'load_growth', 'equipment_cost']
+18:39:08 | DEBUG   |   训练集: 24月, 测试集: 12月
+18:39:08 | INFO    |   [3/6] 模型一: CatBoost...
+18:39:09 | INFO    |         MSE=90.4681 RMSE=9.5115 MAE=9.1727 R^2=-12.3156
+18:39:09 | INFO    |   [4/6] 模型二: VMD-CatBoost...
+18:39:09 | INFO    |         MSE=108.4096 RMSE=10.4120 MAE=10.1393 R^2=-14.9563
+18:39:17 | INFO    |   [图表] VMD分解图(cable) → outputs/figures\vmd_decomposition_cable.png
+18:39:17 | INFO    |   [5/6] 模型三: VMD-LSTM-CatBoost...
+18:39:17 | DEBUG   |     VMD分解: 残差=IMF1, 模态=['IMF2', 'IMF3', 'IMF4', 'IMF5']
+18:39:22 | INFO    |         MSE=107.7251 RMSE=10.3791 MAE=10.0568 R^2=-14.8556
+18:39:22 | INFO    |   [图表] 特征重要性(cable) → outputs/figures\feature_importance_cable.png
+18:39:22 | INFO    | 
+18:39:22 | INFO    | [2/6] 处理 柱上变压器台成套设备 (transformer)...
+18:39:22 | INFO    |   Top-4 影响因子: ['load_growth', 'investment', 'history_demand', 'equipment_cost']
+18:39:22 | DEBUG   |   训练集: 24月, 测试集: 12月
+18:39:22 | INFO    |   [3/6] 模型一: CatBoost...
+18:39:22 | INFO    |         MSE=33.8402 RMSE=5.8172 MAE=5.3338 R^2=-10.3200
+18:39:22 | INFO    |   [4/6] 模型二: VMD-CatBoost...
+18:39:23 | INFO    |         MSE=31.7334 RMSE=5.6332 MAE=5.3836 R^2=-9.6153
+18:39:27 | INFO    |   [图表] VMD分解图(transformer) → outputs/figures\vmd_decomposition_transformer.png
+18:39:27 | INFO    |   [5/6] 模型三: VMD-LSTM-CatBoost...
+18:39:27 | DEBUG   |     VMD分解: 残差=IMF1, 模态=['IMF2', 'IMF3', 'IMF4', 'IMF5']
+18:39:30 | INFO    |         MSE=29.8669 RMSE=5.4651 MAE=5.1882 R^2=-8.9909
+18:39:30 | INFO    |   [图表] 特征重要性(transformer) → outputs/figures\feature_importance_transformer.png
+18:39:30 | INFO    | 
+18:39:30 | INFO    | [2/6] 处理 10kv交流避雷器 (arrester)...
+18:39:30 | INFO    |   Top-4 影响因子: ['lightning_count', 'typhoon_count', 'rainstorm_count', 'load_growth']
+18:39:30 | DEBUG   |   训练集: 24月, 测试集: 12月
+18:39:30 | INFO    |   [3/6] 模型一: CatBoost...
+18:39:30 | INFO    |         MSE=63.4111 RMSE=7.9631 MAE=6.8630 R^2=-1.3857
+18:39:30 | INFO    |   [4/6] 模型二: VMD-CatBoost...
+18:39:31 | INFO    |         MSE=21.8139 RMSE=4.6705 MAE=3.8043 R^2=0.1793
+18:39:37 | INFO    |   [图表] VMD分解图(arrester) → outputs/figures\vmd_decomposition_arrester.png
+18:39:37 | INFO    |   [5/6] 模型三: VMD-LSTM-CatBoost...
+18:39:37 | DEBUG   |     VMD分解: 残差=IMF1, 模态=['IMF2', 'IMF3', 'IMF4', 'IMF5']
+18:39:39 | INFO    |         MSE=24.4842 RMSE=4.9482 MAE=4.3053 R^2=0.0788
+18:39:43 | INFO    |   [图表] 特征重要性(arrester) → outputs/figures\feature_importance_arrester.png
+18:39:43 | INFO    | 
+18:39:43 | INFO    | [6/6] 汇总评估与可视化...
+18:39:43 | INFO    | 
+18:39:43 | INFO    | ========================================================================================================================
+18:39:43 | INFO    | 评估指标汇总表
+18:39:43 | INFO    | ========================================================================================================================
+18:39:43 | INFO    | 物资               模型                              MSE         RMSE          MAE          R^2
+18:39:43 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+18:39:43 | INFO    | 10KV电缆           CatBoost                    90.4681       9.5115       9.1727     -12.3156
+18:39:43 | INFO    |                  VMD-CatBoost               108.4096      10.4120      10.1393     -14.9563
+18:39:43 | INFO    |                  VMD-LSTM-CatBoost          107.7251      10.3791      10.0568     -14.8556
+18:39:43 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+18:39:43 | INFO    | 柱上变压器台成套设备       CatBoost                    33.8402       5.8172       5.3338     -10.3200
+18:39:43 | INFO    |                  VMD-CatBoost                31.7334       5.6332       5.3836      -9.6153
+18:39:43 | INFO    |                  VMD-LSTM-CatBoost           29.8669       5.4651       5.1882      -8.9909
+18:39:43 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+18:39:43 | INFO    | 10kv交流避雷器        CatBoost                    63.4111       7.9631       6.8630      -1.3857
+18:39:43 | INFO    |                  VMD-CatBoost                21.8139       4.6705       3.8043       0.1793
+18:39:43 | INFO    |                  VMD-LSTM-CatBoost           24.4842       4.9482       4.3053       0.0788
+18:39:43 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+18:39:43 | INFO    | 
+18:39:43 | INFO    |   [文件] 指标JSON → outputs/figures\metrics_summary.json
+18:39:51 | INFO    |   [图表] 预测对比图 → outputs/figures\prediction_comparison.png
+18:39:56 | INFO    |   [图表] 指标对比图 → outputs/figures\metrics_comparison.png
+18:39:56 | INFO    | 
+18:39:56 | INFO    | ======================================================================
+18:39:56 | INFO    |   模型性能排序 (按R^2)
+18:39:56 | INFO    | ======================================================================
+18:39:56 | INFO    |   10KV电缆: [1st] CatBoost (R^2=-12.3156)  [2nd] VMD-LSTM-CatBoost (R^2=-14.8556)  [3rd] VMD-CatBoost (R^2=-14.9563)
+18:39:56 | INFO    |   柱上变压器台成套设备: [1st] VMD-LSTM-CatBoost (R^2=-8.9909)  [2nd] VMD-CatBoost (R^2=-9.6153)  [3rd] CatBoost (R^2=-10.3200)
+18:39:56 | INFO    |   10kv交流避雷器: [1st] VMD-CatBoost (R^2=0.1793)  [2nd] VMD-LSTM-CatBoost (R^2=0.0788)  [3rd] CatBoost (R^2=-1.3857)
+18:39:56 | INFO    | 
+18:39:56 | INFO    | 所有图表已保存至: C:\Users\lilacseeking\PycharmProjects\vmd-catboost\outputs\figures/
+18:39:56 | INFO    | 日志文件: C:\Users\lilacseeking\PycharmProjects\vmd-catboost\outputs\logs\main_20260610_183908.log
+18:39:56 | INFO    | 完成!
