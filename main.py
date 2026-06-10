@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.svm import SVR
+from sklearn.model_selection import GridSearchCV
 from catboost import CatBoostRegressor
 from vmdpy import VMD
 import torch
@@ -631,7 +633,46 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     return y_pred_orig, y_test_orig, importance, omega, u, fusion_model
 
 
-# ===================== 9. 模型评估 =====================
+# ===================== 9. 模型四: VMD-SVR =====================
+def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
+                material, demand_scaler):
+    """模型四: VMD(仅训练集)分解 + SVR核方法端到端预测
+
+    SVR 作为经典小样本学习方法，在 24 个训练样本场景下与 CatBoost 对比。
+    输入特征与模型二完全相同（5 IMF + 4因子 = 9维）。
+    """
+    u, _, omega, _, _ = vmd_decompose_full(y_train)
+    imfs_train = u.T
+    imfs_test = extrapolate_imfs(imfs_train, len(y_test))
+
+    X_train_full = np.column_stack([imfs_train, X_train_factors])
+    X_test_full = np.column_stack([imfs_test, X_test_factors])
+
+    # GridSearchCV 调参
+    param_grid = {
+        'C': [0.1, 1, 10, 100],
+        'gamma': ['scale', 'auto', 0.01, 0.1],
+        'epsilon': [0.01, 0.05, 0.1, 0.2],
+    }
+    svr = SVR(kernel='rbf')
+    grid = GridSearchCV(svr, param_grid, cv=3, scoring='neg_mean_squared_error',
+                        n_jobs=1, verbose=0)
+    grid.fit(X_train_full, y_train)
+
+    logger.info(f"  [SVR最优参数] C={grid.best_params_['C']}, gamma={grid.best_params_['gamma']}, "
+                 f"epsilon={grid.best_params_['epsilon']}")
+    logger.info(f"  [SVR超参数搜索] param_grid={param_grid}, cv={3}")
+
+    y_pred = grid.predict(X_test_full)
+    importance = None  # SVR 不直接输出特征重要性
+
+    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+    y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+
+    return y_pred_orig, y_test_orig, importance, omega, u, grid
+
+
+# ===================== 10. 模型评估 =====================
 def evaluate_model(y_true, y_pred):
     """计算 MSE/RMSE/MAE/R²"""
     mse = mean_squared_error(y_true, y_pred)
@@ -647,8 +688,8 @@ def plot_prediction_comparison(all_results):
     """预测对比曲线：每种物资一张图，含三模型预测 vs 真实值"""
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     months = pd.date_range('2024-01-01', periods=12, freq='MS')
-    colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-LSTM-CatBoost': '#FF5722'}
-    markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-LSTM-CatBoost': 'D'}
+    colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-LSTM-CatBoost': '#FF5722', 'VMD-SVR': '#9C27B0'}
+    markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-LSTM-CatBoost': 'D', 'VMD-SVR': 's'}
     y_labels = {'cable': '需求量 (10千米)', 'transformer': '需求量 (套)', 'arrester': '需求量 (台)'}
 
     for ax_idx, material in enumerate(MATERIALS):
@@ -663,7 +704,7 @@ def plot_prediction_comparison(all_results):
 
         # 收集各模型 R² 用于标题
         r2_parts = []
-        for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']:
+        for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-SVR']:
             if model_name in results:
                 pred = results[model_name]['y_pred']
                 pred_x = months[:len(pred)]
@@ -753,13 +794,13 @@ def plot_metrics_comparison(all_metrics):
     """模型指标对比：分组柱状图（各物资各模型的四项指标）"""
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     metric_names = ['MSE', 'RMSE', 'MAE', 'R2']
-    model_names = ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']
-    colors = ['#2196F3', '#4CAF50', '#FF5722']
+    model_names = ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-SVR']
+    colors = ['#2196F3', '#4CAF50', '#FF5722', '#9C27B0']
 
     for ax_idx, metric in enumerate(metric_names):
         ax = axes[ax_idx // 2, ax_idx % 2]
         x = np.arange(len(MATERIALS))
-        width = 0.25
+        width = 0.2
 
         for i, model_name in enumerate(model_names):
             values = []
@@ -775,7 +816,7 @@ def plot_metrics_comparison(all_metrics):
                         f'{val:.4f}', ha='center', va='bottom', fontsize=7, rotation=90)
 
         ax.set_title(metric, fontsize=14, fontweight='bold')
-        ax.set_xticks(x + width)
+        ax.set_xticks(x + width * 1.5)
         ax.set_xticklabels([MATERIAL_LABELS[m] for m in MATERIALS])
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3, axis='y')
@@ -800,7 +841,7 @@ def print_metrics_table(all_metrics):
     lines.append("-" * 120)
 
     for material in MATERIALS:
-        for i, model_name in enumerate(['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']):
+        for i, model_name in enumerate(['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-SVR']):
             metrics = all_metrics[material].get(model_name, {})
             if metrics:
                 if i == 0:
@@ -824,7 +865,7 @@ def main():
     logger.info("=" * 70)
     logger.info("  配电网物资需求预测 —— VMD-CatBoost 模型对比实验")
     logger.info("  物资: 10KV电缆 / 柱上变压器台成套设备 / 10kv交流避雷器")
-    logger.info("  模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost")
+    logger.info("  模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-SVR")
     logger.info("=" * 70)
     logger.info(f"  日志文件: {log_filename}")
     logger.info("[1/6] 加载数据...")
@@ -890,6 +931,18 @@ def main():
             logger.info(f"        MSE={metrics_3['MSE']:.4f} RMSE={metrics_3['RMSE']:.4f} "
                          f"MAE={metrics_3['MAE']:.4f} R^2={metrics_3['R2']:.4f}")
 
+            # --- 模型四: VMD-SVR ---
+            logger.info(f"  [6/7] 模型四: VMD-SVR...")
+            y_pred_4, y_test_4, imp_4, omega_4, u_4, model_4 = run_vmd_svr(
+                X_train_factors, y_train, X_test_factors, y_test,
+                material, demand_scaler)
+            metrics_4 = evaluate_model(y_test_4, y_pred_4)
+            all_results[material]['VMD-SVR'] = {
+                'y_pred': y_pred_4, 'y_test': y_test_4, 'metrics': metrics_4}
+            all_metrics[material]['VMD-SVR'] = metrics_4
+            logger.info(f"        MSE={metrics_4['MSE']:.4f} RMSE={metrics_4['RMSE']:.4f} "
+                         f"MAE={metrics_4['MAE']:.4f} R^2={metrics_4['R2']:.4f}")
+
             # 特征重要性图
             imp_dict = {
                 'catboost_imp': imp_1,
@@ -900,14 +953,14 @@ def main():
 
         # Step 4: 评估汇总
         logger.info("")
-        logger.info("[6/6] 汇总评估与可视化...")
+        logger.info("[7/7] 汇总评估与可视化...")
         print_metrics_table(all_metrics)
 
         # 保存指标 JSON
         metrics_json = {}
         for material in MATERIALS:
             metrics_json[material] = {}
-            for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']:
+            for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-SVR']:
                 if model_name in all_metrics[material]:
                     metrics_json[material][model_name] = all_metrics[material][model_name]
         json_path = os.path.join(OUTPUT_DIR, 'metrics_summary.json')
