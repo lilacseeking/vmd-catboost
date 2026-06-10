@@ -631,7 +631,88 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     return y_pred_orig, y_test_orig, importance, omega, u, fusion_model
 
 
-# ===================== 9. 模型评估 =====================
+# ===================== 9. 模型四: VMD-LSTM（直接求和） =====================
+def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
+                            material, demand_scaler):
+    """模型四: VMD → 5个LSTM预测各分量 → 直接求和（无CatBoost融合层）
+
+    消融实验: 对比 VMD-LSTM 与 VMD-LSTM-CatBoost，验证 CatBoost 融合层的必要性。
+    VMD 分解满足 Σ(IMF_i) = 原始信号，直接求和有物理依据。
+    """
+    seq_len = SEQ_LEN
+    top4 = get_top_factors(material)
+
+    # 1. VMD 仅对训练集分解
+    u, _, omega, residual_idx, modal_indices = vmd_decompose_full(y_train)
+    logger.debug(f"    VMD分解: 残差=IMF{residual_idx+1}, 模态={[f'IMF{i+1}' for i in modal_indices]}")
+
+    u_train = u  # (5, 24)
+    imfs_test_ext = extrapolate_imfs(u.T, len(y_test))
+    u_test = imfs_test_ext.T  # (5, 12)
+
+    lstm_preds_train = []
+    lstm_preds_test = []
+
+    # 2. 残差分量 → 多特征LSTM
+    residual_train = u_train[residual_idx]
+    residual_features_train = np.column_stack([
+        residual_train, X_train_factors[:, 0], X_train_factors[:, 1],
+        X_train_factors[:, 2], X_train_factors[:, 3]
+    ])
+    residual_full_seq = np.concatenate([residual_train[-seq_len:], u_test[residual_idx]])
+    factor_full_seqs = [np.concatenate([X_train_factors[-seq_len:, j], X_test_factors[:, j]])
+                        for j in range(4)]
+    residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
+    residual_features_test = np.column_stack([
+        u_test[residual_idx], X_test_factors[:, 0], X_test_factors[:, 1],
+        X_test_factors[:, 2], X_test_factors[:, 3]
+    ])
+
+    X_r, y_r = create_sequences(residual_features_train, seq_len)
+    X_r_test, _ = create_sequences(residual_features_full, seq_len)
+
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=12, dropout=0.5)
+    mf_model = train_lstm_model(mf_model, X_r, y_r)
+
+    mf_model.eval()
+    with torch.no_grad():
+        pred_r_train = mf_model(torch.FloatTensor(X_r).to(DEVICE)).cpu().numpy().flatten()
+        pred_r_test = mf_model(torch.FloatTensor(X_r_test).to(DEVICE)).cpu().numpy().flatten()
+    lstm_preds_train.append(pred_r_train)
+    lstm_preds_test.append(pred_r_test)
+
+    # 3. 4个模态分量 → 单特征LSTM
+    for idx in modal_indices:
+        modal_train = u_train[idx]
+        modal_full = np.concatenate([modal_train[-seq_len:], u_test[idx]])
+
+        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len)
+        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len)
+
+        sf_model = SingleFeatureLSTM(hidden_size=8, dropout=0.5)
+        sf_model = train_lstm_model(sf_model, X_m, y_m)
+
+        sf_model.eval()
+        with torch.no_grad():
+            pred_m_train = sf_model(torch.FloatTensor(X_m).to(DEVICE)).cpu().numpy().flatten()
+            pred_m_test = sf_model(torch.FloatTensor(X_m_test).to(DEVICE)).cpu().numpy().flatten()
+        lstm_preds_train.append(pred_m_train)
+        lstm_preds_test.append(pred_m_test)
+
+    # 4. 直接求和（VMD 重构特性: ΣIMF = 原始信号）
+    y_pred_sum_train = np.sum(lstm_preds_train, axis=0)
+    y_pred_sum_test = np.sum(lstm_preds_test, axis=0)
+
+    effective_test_len = len(y_pred_sum_test)
+    y_test_aligned = y_test[-effective_test_len:]
+
+    y_test_orig = demand_scaler.inverse_transform(y_test_aligned.reshape(-1, 1)).flatten()
+    y_pred_orig = demand_scaler.inverse_transform(y_pred_sum_test.reshape(-1, 1)).flatten()
+
+    return y_pred_orig, y_test_orig, None, omega, u, None
+
+
+# ===================== 10. 模型评估 =====================
 def evaluate_model(y_true, y_pred):
     """计算 MSE/RMSE/MAE/R²"""
     mse = mean_squared_error(y_true, y_pred)
@@ -647,8 +728,8 @@ def plot_prediction_comparison(all_results):
     """预测对比曲线：每种物资一张图，含三模型预测 vs 真实值"""
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     months = pd.date_range('2024-01-01', periods=12, freq='MS')
-    colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-LSTM-CatBoost': '#FF5722'}
-    markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-LSTM-CatBoost': 'D'}
+    colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-LSTM-CatBoost': '#FF5722', 'VMD-LSTM': '#795548'}
+    markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-LSTM-CatBoost': 'D', 'VMD-LSTM': 'v'}
     y_labels = {'cable': '需求量 (10千米)', 'transformer': '需求量 (套)', 'arrester': '需求量 (台)'}
 
     for ax_idx, material in enumerate(MATERIALS):
@@ -663,7 +744,7 @@ def plot_prediction_comparison(all_results):
 
         # 收集各模型 R² 用于标题
         r2_parts = []
-        for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']:
+        for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM']:
             if model_name in results:
                 pred = results[model_name]['y_pred']
                 pred_x = months[:len(pred)]
@@ -753,13 +834,13 @@ def plot_metrics_comparison(all_metrics):
     """模型指标对比：分组柱状图（各物资各模型的四项指标）"""
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     metric_names = ['MSE', 'RMSE', 'MAE', 'R2']
-    model_names = ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']
-    colors = ['#2196F3', '#4CAF50', '#FF5722']
+    model_names = ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM']
+    colors = ['#2196F3', '#4CAF50', '#FF5722', '#795548']
 
     for ax_idx, metric in enumerate(metric_names):
         ax = axes[ax_idx // 2, ax_idx % 2]
         x = np.arange(len(MATERIALS))
-        width = 0.25
+        width = 0.2
 
         for i, model_name in enumerate(model_names):
             values = []
@@ -775,7 +856,7 @@ def plot_metrics_comparison(all_metrics):
                         f'{val:.4f}', ha='center', va='bottom', fontsize=7, rotation=90)
 
         ax.set_title(metric, fontsize=14, fontweight='bold')
-        ax.set_xticks(x + width)
+        ax.set_xticks(x + width * 1.5)
         ax.set_xticklabels([MATERIAL_LABELS[m] for m in MATERIALS])
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3, axis='y')
@@ -800,7 +881,7 @@ def print_metrics_table(all_metrics):
     lines.append("-" * 120)
 
     for material in MATERIALS:
-        for i, model_name in enumerate(['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']):
+        for i, model_name in enumerate(['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM']):
             metrics = all_metrics[material].get(model_name, {})
             if metrics:
                 if i == 0:
@@ -824,7 +905,7 @@ def main():
     logger.info("=" * 70)
     logger.info("  配电网物资需求预测 —— VMD-CatBoost 模型对比实验")
     logger.info("  物资: 10KV电缆 / 柱上变压器台成套设备 / 10kv交流避雷器")
-    logger.info("  模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost")
+    logger.info("  模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-LSTM")
     logger.info("=" * 70)
     logger.info(f"  日志文件: {log_filename}")
     logger.info("[1/6] 加载数据...")
@@ -890,6 +971,18 @@ def main():
             logger.info(f"        MSE={metrics_3['MSE']:.4f} RMSE={metrics_3['RMSE']:.4f} "
                          f"MAE={metrics_3['MAE']:.4f} R^2={metrics_3['R2']:.4f}")
 
+            # --- 模型四: VMD-LSTM（直接求和消融实验）---
+            logger.info(f"  [6/7] 模型四: VMD-LSTM(直接求和)...")
+            y_pred_4, y_test_4, imp_4, omega_4, u_4, model_4 = run_vmd_lstm_direct_sum(
+                X_train_factors, y_train, X_test_factors, y_test,
+                material, demand_scaler)
+            metrics_4 = evaluate_model(y_test_4, y_pred_4)
+            all_results[material]['VMD-LSTM'] = {
+                'y_pred': y_pred_4, 'y_test': y_test_4, 'metrics': metrics_4}
+            all_metrics[material]['VMD-LSTM'] = metrics_4
+            logger.info(f"        MSE={metrics_4['MSE']:.4f} RMSE={metrics_4['RMSE']:.4f} "
+                         f"MAE={metrics_4['MAE']:.4f} R^2={metrics_4['R2']:.4f}")
+
             # 特征重要性图
             imp_dict = {
                 'catboost_imp': imp_1,
@@ -900,14 +993,14 @@ def main():
 
         # Step 4: 评估汇总
         logger.info("")
-        logger.info("[6/6] 汇总评估与可视化...")
+        logger.info("[7/7] 汇总评估与可视化...")
         print_metrics_table(all_metrics)
 
         # 保存指标 JSON
         metrics_json = {}
         for material in MATERIALS:
             metrics_json[material] = {}
-            for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost']:
+            for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM']:
                 if model_name in all_metrics[material]:
                     metrics_json[material][model_name] = all_metrics[material][model_name]
         json_path = os.path.join(OUTPUT_DIR, 'metrics_summary.json')
