@@ -119,10 +119,28 @@ flowchart TB
         D5 --> D6["predict: test 预测"]
     end
 
-    subgraph 评估层["5. 评估与可视化"]
+    subgraph 模型四["5. 模型四: VMD-LSTM(直接求和)"]
+        A4 --> G1["VMD分解需求量<br/>K=5 个IMF"]
+        G1 --> G2["分离：残差分量(1) + 模态分量(4)"]
+        G2 --> G3["残差 + 4因子<br/>→ 多特征LSTM"]
+        G2 --> G4["模态1-4<br/>→ 4个单特征LSTM"]
+        G3 --> G5["5个LSTM预测值<br/>→ 直接求和 Σ(IMF)"]
+        G4 --> G5
+        G5 --> G6["predict: test 预测"]
+    end
+
+    subgraph 模型五["6. 模型五: VMD-SVR"]
+        A4 --> H1["VMD分解需求量<br/>K=5 个IMF"]
+        H1 --> H2["train: 5个IMF + 4因子 → SVR<br/>GridSearchCV(RBF核)"]
+        H2 --> H3["predict: test 预测"]
+    end
+
+    subgraph 评估层["7. 评估与可视化"]
         B2 --> E1["四项指标评估<br/>MSE/RMSE/MAE/R²"]
         C3 --> E1
         D6 --> E1
+        G6 --> E1
+        H3 --> E1
         E1 --> E2["模型对比表 + 柱状图"]
         E1 --> E3["预测对比曲线图<br/>（三类物资×五模型）"]
         E1 --> E4["VMD分解可视化<br/>（5个IMF波形）"]
@@ -133,7 +151,9 @@ flowchart TB
     style 模型一 fill:#fff3e0
     style 模型二 fill:#e8f5e9
     style 模型三 fill:#f3e5f5
-    style 评估层 fill:#fce4ec
+    style 模型四 fill:#e0f2f1
+    style 模型五 fill:#fce4ec
+    style 评估层 fill:#ede7f6
 ```
 
 ### 3.3 五种模型的信号流对比
@@ -166,9 +186,31 @@ flowchart LR
         M3_CAT --> M3_OUT["预测值"]
     end
 
+    subgraph M4["模型四: VMD-LSTM(直接求和)"]
+        direction TB
+        M4_IN["原始需求量"] --> M4_VMD["VMD K=5"]
+        M4_VMD --> M4_RES["残差分量 IMF_k"]
+        M4_VMD --> M4_MOD["4个模态分量"]
+        M4_RES --> M4_MLSTM["多特征LSTM<br/>(+4因子)"]
+        M4_MOD --> M4_SLSTM["4个单特征LSTM"]
+        M4_MLSTM --> M4_SUM["直接求和<br/>Σ(IMF)"]
+        M4_SLSTM --> M4_SUM
+        M4_SUM --> M4_OUT["预测值"]
+    end
+
+    subgraph M5["模型五: VMD-SVR"]
+        direction TB
+        M5_IN["原始需求量"] --> M5_VMD["VMD K=5"] --> M5_IMF["5个IMF分量"]
+        M5_IMF --> M5_MERGE["5个IMF + 4因子"]
+        M5_FAC["4个影响因子"] --> M5_MERGE
+        M5_MERGE --> M5_SVR["SVR<br/>GridSearchCV(RBF)"] --> M5_OUT["预测值"]
+    end
+
     style M1 fill:#fff3e0
     style M2 fill:#e8f5e9
     style M3 fill:#f3e5f5
+    style M4 fill:#e0f2f1
+    style M5 fill:#fce4ec
 ```
 
 ---
@@ -395,6 +437,8 @@ sequenceDiagram
     participant M2 as VMD-CatBoost模型
     participant M3_LSTM as LSTM模块
     participant M3_CB as CatBoost融合
+    participant M4_LSTM as LSTM模块(模型四)
+    participant M5_SVR as SVR模型
     participant EVAL as 评估模块
     participant PLOT as 可视化模块
 
@@ -410,12 +454,12 @@ sequenceDiagram
         DATA-->>MAIN: X_train, X_test, y_train, y_test
 
         par 模型一: CatBoost
-            MAIN->>M1: run_catboost(X_train, y_train, X_test, y_test)
+            MAIN->>M1: run_catboost(X_factors, y, material)
             M1-->>MAIN: y_pred_1, importance, model_1
         and 模型二: VMD-CatBoost
             MAIN->>VMD: VMD(y_train, K=5)
             VMD-->>MAIN: imfs (5, 24)
-            MAIN->>M2: run_vmd_catboost(imfs, X_factors, y)
+            MAIN->>M2: run_vmd_catboost(imfs, X_factors, y, material)
             M2-->>MAIN: y_pred_2, model_2
         and 模型三: VMD-LSTM-CatBoost
             MAIN->>VMD: VMD(y_train, K=5)
@@ -428,20 +472,37 @@ sequenceDiagram
             end
             MAIN->>M3_CB: catboost_fusion(5 LSTM preds + 4 factors, y_train)
             M3_CB-->>MAIN: y_pred_3, model_3
+        and 模型四: VMD-LSTM(直接求和)
+            MAIN->>VMD: VMD(y_train, K=5)
+            VMD-->>MAIN: residual + modals
+            MAIN->>M4_LSTM: lstm_multi_feature(residual + 4 factors)
+            M4_LSTM-->>MAIN: pred_residual
+            loop 4个模态分量
+                MAIN->>M4_LSTM: lstm_single_feature(modal_i)
+                M4_LSTM-->>MAIN: pred_modal_i
+            end
+            Note over M4_LSTM: 直接求和 Σ(IMF预测值)
+            M4_LSTM-->>MAIN: y_pred_4
+        and 模型五: VMD-SVR
+            MAIN->>VMD: VMD(y_train, K=5)
+            VMD-->>MAIN: imfs (5, 24)
+            MAIN->>M5_SVR: GridSearchCV(SVR, RBF核)
+            Note over M5_SVR: 3折交叉验证<br/>C/gamma/epsilon搜索
+            M5_SVR-->>MAIN: y_pred_5, model_5
         end
 
         MAIN->>EVAL: evaluate_all(y_test, {preds})
-        EVAL-->>MAIN: metrics_df (3×4 指标矩阵)
+        EVAL-->>MAIN: metrics_df (5×4 指标矩阵)
     end
 
     MAIN->>PLOT: plot_prediction_comparison(results)
-    Note over PLOT: 9张预测对比图<br/>(3物资 × 3模型)
+    Note over PLOT: 3张预测对比图<br/>(每种物资独立, 5模型同轴)
     MAIN->>PLOT: plot_vmd_decomposition(y, imfs, omega)
-    Note over PLOT: VMD分解波形图
+    Note over PLOT: VMD分解波形图(3张)
     MAIN->>PLOT: plot_feature_importance(importance)
-    Note over PLOT: 特征重要性条形图
+    Note over PLOT: 特征重要性条形图(3张)
     MAIN->>PLOT: plot_metrics_comparison(metrics_df)
-    Note over PLOT: 模型指标对比柱状图
+    Note over PLOT: 模型指标对比柱状图(5模型)
 
     MAIN-->>User: 输出评估指标表 + 所有图表
 ```
