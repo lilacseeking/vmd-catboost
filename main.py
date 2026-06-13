@@ -741,6 +741,7 @@ def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
     y_pred = grid.predict(X_test_full)
     y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
     y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+    y_pred_orig = np.maximum(y_pred_orig, 0)  # 物理约束：需求量非负
     return y_pred_orig, y_test_orig, None, omega, u, grid
 
 
