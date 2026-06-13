@@ -1,18 +1,20 @@
 # VMD-CatBoost 配电网物资需求预测
 
-基于 **VMD（变分模态分解）** 与 **CatBoost** 的配电网物资月度需求量预测模型。对比三种模型架构（CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost），对三类核心配电网物资（10KV电缆、柱上变压器、避雷器）进行精确预测。
+基于 **VMD（变分模态分解）** 与 **CatBoost** 的配电网物资月度需求量预测模型。对比五种模型架构（CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-LSTM / VMD-SVR），对三类核心配电网物资（10KV电缆、柱上变压器、避雷器）进行精确预测。
 
 ## 项目背景
 
 配电网物资需求序列具有**非平稳、波动强**的特性，传统预测方法精度不足。本项目构建 VMD-CatBoost 复合预测模型，通过斯皮尔曼相关性分析筛选关键影响因子，利用 VMD 分解降低序列噪声，结合 LSTM 捕获时序依赖与 CatBoost 梯度提升树进行回归预测，为电网物资供应链智能调度提供决策依据。
 
-## 三种模型
+## 五种模型
 
 | 模型 | 核心思路 |
 |------|---------|
 | **CatBoost** | 4 个影响因子 → CatBoost 直接回归预测（基线） |
-| **VMD-CatBoost** | VMD 分解需求量(K=5) → 5 个 IMF + 4 个因子 → CatBoost |
+| **VMD-CatBoost** | VMD 分解需求量(K=5) → 5 个 IMF + 4 个因子 → CatBoost 端到端 |
 | **VMD-LSTM-CatBoost** | VMD 分解 → 残差分量多特征 LSTM + 4 个模态分量单特征 LSTM → CatBoost 融合 |
+| **VMD-LSTM** | VMD 分解 → 5 个 LSTM 预测各分量 → 直接求和（消融实验，验证 CatBoost 融合层必要性） |
+| **VMD-SVR** | VMD 分解需求量(K=5) → 5 个 IMF + 4 个因子 → SVR（核方法对比） |
 
 ## 三类物资
 
@@ -66,10 +68,10 @@ python main.py
 
 | 文件 | 内容 |
 |------|------|
-| `prediction_comparison.png` | 三物资 × 三模型预测对比曲线 |
+| `prediction_comparison_*.png` | 每种物资独立成图，五模型预测 vs 真实值对比曲线 |
 | `vmd_decomposition_*.png` | 每物资的 VMD 分解波形（5 IMF） |
-| `feature_importance_*.png` | 每物资的特征重要性排序 |
-| `metrics_comparison.png` | 四指标分组柱状图 |
+| `feature_importance_*.png` | 每物资的特征重要性排序（含 CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost） |
+| `metrics_comparison.png` | 四指标分组柱状图（五模型对比） |
 | `metrics_summary.json` | 评估指标 JSON |
 
 ### 日志 (`outputs/logs/`)

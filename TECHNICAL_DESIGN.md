@@ -9,7 +9,7 @@
 1. [项目概述](#1-项目概述)
 2. [数据说明](#2-数据说明)
 3. [技术架构](#3-技术架构)
-4. [三种模型详解](#4-三种模型详解)
+4. [五种模型详解](#4-五种模型详解)
 5. [核心流程时序图](#5-核心流程时序图)
 6. [代码模块说明（main.py 单文件）](#6-代码模块说明)
 7. [生成图表清单](#7-生成图表清单)
@@ -22,7 +22,7 @@
 
 ### 1.1 研究目标
 
-针对配电网物资需求序列的**非平稳、波动强**特性，分别使用 **CatBoost**、**VMD-CatBoost**、**VMD-LSTM-CatBoost** 三种模型对三类配电网核心物资进行需求预测，通过四项评估指标对比模型性能，为电网物资供应链智能调度提供决策依据。
+针对配电网物资需求序列的**非平稳、波动强**特性，分别使用 **CatBoost**、**VMD-CatBoost**、**VMD-LSTM-CatBoost**、**VMD-LSTM**、**VMD-SVR** 五种模型对三类配电网核心物资进行需求预测，通过四项评估指标对比模型性能，为电网物资供应链智能调度提供决策依据。
 
 ### 1.2 三类物资
 
@@ -32,13 +32,15 @@
 | 柱上变压器 | transformer | 用户增容类 | 业扩报装、容量升级 |
 | 避雷器 | arrester | 应急抢修类 | 雷击防护、故障抢修 |
 
-### 1.3 三种对比模型
+### 1.3 五种对比模型
 
 | 模型 | 缩写 | 核心思路 |
 |------|------|---------|
 | **模型一** | CatBoost | 原始数据 + 影响因子 → CatBoost 直接预测 |
 | **模型二** | VMD-CatBoost | VMD 分解需求量 → 全部分量 + 影响因子 → CatBoost 端到端 |
 | **模型三** | VMD-LSTM-CatBoost | VMD 分解 → 残差分量多特征 LSTM + 模态分量单特征 LSTM → CatBoost 融合 |
+| **模型四** | VMD-LSTM | VMD 分解 → 5 个 LSTM 预测各分量 → 直接求和（消融实验，验证 CatBoost 融合层必要性） |
+| **模型五** | VMD-SVR | VMD 分解需求量 → 全部分量 + 影响因子 → SVR 核方法端到端（核方法对比） |
 
 ---
 
@@ -122,7 +124,7 @@ flowchart TB
         C3 --> E1
         D6 --> E1
         E1 --> E2["模型对比表 + 柱状图"]
-        E1 --> E3["预测对比曲线图<br/>（三类物资×三模型）"]
+        E1 --> E3["预测对比曲线图<br/>（三类物资×五模型）"]
         E1 --> E4["VMD分解可视化<br/>（5个IMF波形）"]
         E1 --> E5["特征重要性图<br/>（CatBoost输出）"]
     end
@@ -134,7 +136,7 @@ flowchart TB
     style 评估层 fill:#fce4ec
 ```
 
-### 3.3 三种模型的信号流对比
+### 3.3 五种模型的信号流对比
 
 ```mermaid
 flowchart LR
@@ -171,7 +173,7 @@ flowchart LR
 
 ---
 
-## 4. 三种模型详解
+## 4. 五种模型详解
 
 ### 4.1 模型一：CatBoost（基线模型）
 
@@ -183,29 +185,35 @@ flowchart LR
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| iterations | 500 | 迭代轮数（小数据集不宜过大） |
-| learning_rate | 0.03 | 学习率 |
-| depth | 4 | 树深度（小数据防过拟合） |
+| iterations | 500（避雷器800） | 迭代轮数（小数据集不宜过大；避雷器含大量零值需增强拟合） |
+| learning_rate | 0.03（避雷器0.02） | 学习率 |
+| depth | 4（避雷器6） | 树深度（小数据防过拟合；避雷器需更深树拟合零/非零二值模式） |
 | l2_leaf_reg | 5 | L2 正则化 |
 | loss_function | RMSE | 损失函数 |
 | early_stopping_rounds | 30 | 早停轮数 |
 
+> **物资差异化策略**: 避雷器数据含 41.7% 零值（干季需求为零），需要更强的拟合能力，因此提升 iterations/depth 并降低 learning_rate。
+
 **方法流程**:
 ```python
-def run_catboost(X_train, y_train, X_test, y_test, material_name):
+def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler):
     """模型一：CatBoost 直接预测"""
+    iters = 800 if material == 'arrester' else 500
+    depth = 6 if material == 'arrester' else 4
+    lr = 0.02 if material == 'arrester' else 0.03
     model = CatBoostRegressor(
-        iterations=500, learning_rate=0.03, depth=4,
+        iterations=iters, learning_rate=lr, depth=depth,
         l2_leaf_reg=5, loss_function='RMSE',
         early_stopping_rounds=30, random_seed=42, verbose=0
     )
-    # 时序验证集: 前18月训练, 后6月验证
-    n_val = 6
-    model.fit(X_train[:-n_val], y_train[:-n_val],
-              eval_set=(X_train[-n_val:], y_train[-n_val:]))
-    y_pred = model.predict(X_test)
+    n_val = min(6, len(y_train) // 4)
+    model.fit(X_train_factors[:-n_val], y_train[:-n_val],
+              eval_set=(X_train_factors[-n_val:], y_train[-n_val:]))
+    y_pred = model.predict(X_test_factors)
     importance = model.get_feature_importance()
-    return y_pred, importance, model
+    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+    y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+    return y_pred_orig, y_test_orig, importance, model
 ```
 
 ### 4.2 模型二：VMD-CatBoost（端到端）
@@ -271,13 +279,13 @@ Step 3: CatBoost融合
 | 组件 | 多特征LSTM（残差） | 单特征LSTM（模态×4） |
 |------|-------------------|---------------------|
 | 输入维度 | 5（残差 + 4因子） | 1（模态分量本身） |
-| hidden_size | 32 | 16 |
+| hidden_size | 12 | 8 |
 | num_layers | 1 | 1 |
-| dropout | 0.2 | 0.3 |
+| dropout | 0.5 | 0.5 |
 | 输出维度 | 1 | 1 |
-| 优化器 | Adam(lr=0.01) | Adam(lr=0.01) |
+| 优化器 | Adam(lr=0.005) | Adam(lr=0.005) |
 | 损失函数 | MSELoss | MSELoss |
-| 训练轮数 | 200（早停 patience=30） | 200（早停 patience=30） |
+| 训练轮数 | 400（早停 patience=50） | 400（早停 patience=50） |
 
 **方法流程**:
 ```python
@@ -308,6 +316,71 @@ def run_vmd_lstm_catboost(y_train, y_test, X_train_factors, X_test_factors,
     return y_pred
 ```
 
+### 4.4 模型四：VMD-LSTM（直接求和，消融实验）
+
+**核心思路**: VMD 分解后分别用 LSTM 预测各分量，直接求和得到最终预测值（无 CatBoost 融合层）。
+
+**消融目的**: 对比 VMD-LSTM 与 VMD-LSTM-CatBoost，验证 CatBoost 融合层的必要性。VMD 分解满足 Σ(IMF_i) = 原始信号，直接求和有物理依据。
+
+**架构特点**:
+- 与模型三的 LSTM 阶段完全一致（5 个 LSTM：1 个多特征 + 4 个单特征）
+- 不使用 CatBoost 融合层，5 个 LSTM 预测结果直接相加
+- 若性能接近模型三，说明 CatBoost 融合层非必需
+- 若性能显著差于模型三，验证了融合层的必要性
+
+**方法流程**:
+```python
+def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
+                            material, demand_scaler):
+    """模型四: VMD → 5个LSTM预测各分量 → 直接求和（消融实验）"""
+    # VMD 仅对训练集分解（与模型三相同）
+    u, _, omega, residual_idx, modal_indices = vmd_decompose_full(y_train)
+    # 训练各分量 LSTM（与模型三相同）
+    # 直接求和（无CatBoost融合层）
+    y_pred_sum_test = np.sum(lstm_preds_test, axis=0)
+    return y_pred_orig, y_test_orig, None, omega, u, None
+```
+
+### 4.5 模型五：VMD-SVR（核方法对比）
+
+**核心思路**: 与模型二结构对称——将 CatBoost 替换为 SVR（支持向量回归），提供核方法与梯度提升树在 VMD 特征空间下的性能对比。
+
+**SVR 参数**: 通过 GridSearchCV 在训练集上进行 3 折交叉验证。
+
+| 参数 | 搜索范围 |
+|------|---------|
+| C | [0.1, 1, 10, 100] |
+| gamma | ['scale', 'auto', 0.01, 0.1] |
+| epsilon | [0.01, 0.05, 0.1, 0.2] |
+| kernel | rbf（固定） |
+
+**输入特征**: 5 个 IMF 分量 + 4 个影响因子 = 9 维特征（与模型二完全一致）
+
+**已知局限**:
+- SVR 作为核方法对特征符号和尺度敏感，VMD 分解产生的 IMF 分量含负值且围绕零轴波动
+- 树模型（CatBoost）天然对特征符号不敏感，在相同特征空间下表现更优
+- 小样本（24 个训练点）下 SVR 的网格搜索易过拟合
+
+**方法流程**:
+```python
+def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
+                material, demand_scaler):
+    """模型五: VMD分解 + SVR核方法端到端预测"""
+    u, _, omega, _, _ = vmd_decompose_full(y_train)
+    imfs_train = u.T
+    imfs_test = extrapolate_imfs(imfs_train, len(y_test))
+    X_train_full = np.column_stack([imfs_train, X_train_factors])
+    X_test_full = np.column_stack([imfs_test, X_test_factors])
+    param_grid = {'C': [0.1, 1, 10, 100],
+                  'gamma': ['scale', 'auto', 0.01, 0.1],
+                  'epsilon': [0.01, 0.05, 0.1, 0.2]}
+    svr = SVR(kernel='rbf')
+    grid = GridSearchCV(svr, param_grid, cv=3, scoring='neg_mean_squared_error')
+    grid.fit(X_train_full, y_train)
+    y_pred = grid.predict(X_test_full)
+    return y_pred_orig, y_test_orig, None, omega, u, grid
+```
+
 ---
 
 ## 5. 核心流程时序图
@@ -327,7 +400,7 @@ sequenceDiagram
 
     User->>MAIN: python main.py
 
-    MAIN->>DATA: generate_sample_data()
+    MAIN->>DATA: _generate_all_data(months)
     Note over DATA: 生成3种物资×36月数据<br/>7个影响因子
     DATA-->>MAIN: data_dict (cable/transformer/arrester)
 
@@ -381,7 +454,7 @@ sequenceDiagram
 
 ```python
 # main.py — 配电网物资需求预测
-# 三种模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost
+# 五种模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-LSTM / VMD-SVR
 # Python 3.12
 
 # ============ 导入 ============
@@ -403,9 +476,9 @@ VMD_K = 5
 SEQ_LEN = 6  # LSTM 时间窗口：用过去6个月预测下个月
 RANDOM_SEED = 42
 
-# ============ 1. 数据生成 ============
-def generate_sample_data(): ...
-def add_seasonal_noise(data, factor=0.1): ...
+# ============ 1. 数据加载/生成 ============
+def _generate_all_data(months): ...
+def load_or_generate_data(): ...
 
 # ============ 2. 数据预处理 ============
 def get_top_factors(material_name): ...
@@ -421,35 +494,41 @@ def create_sequences(data, seq_len): ...
 def train_lstm(model, X, y, epochs, patience): ...
 
 # ============ 5. 模型一: CatBoost ============
-def run_catboost(X_train, y_train, X_test, y_test, name): ...
+def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler): ...
 
 # ============ 6. 模型二: VMD-CatBoost ============
-def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test, name): ...
+def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler): ...
 
 # ============ 7. 模型三: VMD-LSTM-CatBoost ============
-def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test, name): ...
+def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler): ...
 
-# ============ 8. 评估 ============
+# ============ 8. 模型四: VMD-LSTM（直接求和） ============
+def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler): ...
+
+# ============ 9. 模型五: VMD-SVR ============
+def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler): ...
+
+# ============ 10. 评估 ============
 def evaluate_model(y_true, y_pred): ...
 
-# ============ 9. 可视化 ============
-def plot_prediction_comparison(results, material_name): ...
-def plot_vmd_decomposition(y, imfs, omega, material_name): ...
-def plot_feature_importance(importance, factors, model_name, material_name): ...
+# ============ 11. 可视化 ============
+def plot_prediction_comparison(all_results, material): ...
+def plot_vmd_decomposition(demand_full, u, omega, material): ...
+def plot_feature_importance(importance_dict, material): ...
 def plot_metrics_comparison(all_metrics): ...
 
-# ============ 10. 主函数 ============
+# ============ 12. 主函数 ============
 def main(): ...
 ```
 
 ### 6.2 关键方法说明
 
-#### 6.2.1 数据生成 `generate_sample_data()`
+#### 6.2.1 数据生成 `_generate_all_data()`
 
-由于论文使用模拟数据，本方法为三种物资各生成 36 个月的需求量和 7 个影响因子数据。需求量包含趋势分量（线性增长）、季节性分量（正弦波）和随机噪声；影响因子基于实际物理规律生成（如台风集中在 6-10 月、负荷逐年增长等）。
+由于论文使用模拟数据，本方法为三种物资各生成 36 个月的需求量和对应的 4-6 个影响因子数据。需求量包含趋势分量（线性增长）、季节性分量（正弦波）和随机噪声；影响因子基于实际物理规律生成（如台风集中在 6-10 月、负荷逐年增长等）。统一因子（负荷增长量、雷击、台风、暴雨）在同一月份所有物资共享。
 
 ```python
-def generate_sample_data():
+def _generate_all_data(months):
     """为三种物资生成36个月模拟数据（2022.01-2024.12）"""
     np.random.seed(RANDOM_SEED)
     months = pd.date_range('2022-01-01', periods=36, freq='MS')
@@ -631,14 +710,14 @@ def evaluate_model(y_true, y_pred):
 
 | 编号 | 图表名称 | 方法 | 数量 | 说明 |
 |------|---------|------|------|------|
-| F1 | 预测对比曲线 | `plot_prediction_comparison()` | 1张 | 1张图含3个子图，每子图一种物资，三模型预测 vs 真实值同轴对比 |
+| F1 | 预测对比曲线 | `plot_prediction_comparison()` | 3张 | 每种物资独立成图，五模型预测 vs 真实值同轴对比 |
 | F2 | VMD分解波形 | `plot_vmd_decomposition()` | 3张 | 每物资1张，展示原始信号 + 5个IMF分量（含中心频率标注） |
 | F3 | 特征重要性 | `plot_feature_importance()` | 3张 | 每物资1张含3子图（CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost） |
-| F4 | 模型指标对比 | `plot_metrics_comparison()` | 1张 | 2×2子图：MSE/RMSE/MAE/R² 分组柱状图，含数值标注 |
+| F4 | 模型指标对比 | `plot_metrics_comparison()` | 1张 | 2×2子图：MSE/RMSE/MAE/R² 分组柱状图（五模型），含数值标注 |
 | F5 | 评估汇总表 | `print_metrics_table()` | 控制台 | 控制台打印格式化的指标对比表 |
 | F6 | 指标JSON | `json.dump()` | 1文件 | `metrics_summary.json` 保存所有评估指标 |
 
-> 总计：约 8 张图表 + 1 个 JSON 文件，均保存到 `outputs/figures/` 目录，DPI=150。
+> 总计：约 10 张图表 + 1 个 JSON 文件，均保存到 `outputs/figures/` 目录，DPI=150。
 
 ---
 
@@ -662,25 +741,29 @@ def evaluate_model(y_true, y_pred):
 VMD-CatBoost ≈ VMD-LSTM-CatBoost > CatBoost
        ↑                ↑              ↑
     端到端高效      消融验证      基线模型
+
+注: VMD-LSTM（直接求和）作为消融实验验证融合层必要性；VMD-SVR 作为核方法对比。
 ```
 
 ### 8.3 功能验收清单
 
-- [ ] **AC1**: `generate_sample_data()` 正确生成 3 种物资 × 36 月数据，含 7 个因子
+- [ ] **AC1**: `_generate_all_data()` / `load_or_generate_data()` 正确生成/加载 3 种物资 × 36 月数据，含 7 个因子
 - [ ] **AC2**: `get_top_factors()` 每种物资返回正确的 top-4 因子列表
 - [ ] **AC3**: `preprocess_data()` 正确进行 MinMax 归一化 + 24/12 时序分割
 - [ ] **AC4**: 模型一 `run_catboost()` 对三种物资分别训练并输出预测值
 - [ ] **AC5**: 模型二 `run_vmd_catboost()` 正确进行 VMD K=5 分解后 CatBoost 训练
 - [ ] **AC6**: 模型三 `run_vmd_lstm_catboost()` 正确区分残差/模态分量，LSTM 训练收敛
-- [ ] **AC7**: `evaluate_model()` 对每个模型输出 MSE/RMSE/MAE/R² 四项指标
-- [ ] **AC8**: 所有图表正确保存到 `outputs/figures/` 目录，中文正常显示
-- [ ] **AC9**: `python main.py` 可完整运行，无需额外配置
+- [ ] **AC7**: 模型四 `run_vmd_lstm_direct_sum()` 正确执行各分量 LSTM 预测 + 直接求和
+- [ ] **AC8**: 模型五 `run_vmd_svr()` 正确进行 GridSearchCV 搜索 + SVR 预测
+- [ ] **AC9**: `evaluate_model()` 对每个模型输出 MSE/RMSE/MAE/R² 四项指标
+- [ ] **AC10**: 所有图表正确保存到 `outputs/figures/` 目录，中文正常显示
+- [ ] **AC11**: `python main.py` 可完整运行，无需额外配置
 
 ### 8.4 代码质量验收
 
 - [ ] **CQ1**: 全部代码在 `main.py` 单文件中，无外部模块导入
 - [ ] **CQ2**: 无多余错误处理、异常捕获逻辑
-- [ ] **CQ3**: 核心功能完整：数据生成 → 预处理 → 三模型训练 → 评估 → 可视化
+- [ ] **CQ3**: 核心功能完整：数据生成 → 预处理 → 五模型训练 → 评估 → 可视化
 - [ ] **CQ4**: `pip install -r requirements.txt` 即可运行
 - [ ] **CQ5**: Python 3.12 兼容
 
