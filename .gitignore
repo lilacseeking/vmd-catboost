@@ -13,15 +13,8 @@ venv/
 .idea/
 .vscode/
 
-# Outputs (generated at runtime)
-outputs/figures/
-outputs/logs/
-
 # Models (large binary files)
 models/
-
-# Data (generated at first run)
-inputs/data/
 
 # OS
 .DS_Store
