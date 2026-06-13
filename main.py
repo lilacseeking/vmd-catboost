@@ -646,6 +646,10 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     seq_len = SEQ_LEN
     top4 = get_top_factors(material)
 
+    logger.info(f"  [VMD-LSTM直接求和架构] VMD(K={VMD_K}) → 1×MultiFeatureLSTM(hidden=6) + "
+                f"4×SingleFeatureLSTM(hidden=4) → 直接求和 | "
+                f"序列长度(seq_len)={seq_len}, 输入特征数(input_features)=4(top-4因子)")
+
     # 1. VMD 仅对训练集分解
     u, _, omega, residual_idx, modal_indices = vmd_decompose_full(y_train)
     logger.debug(f"    VMD分解: 残差=IMF{residual_idx+1}, 模态={[f'IMF{i+1}' for i in modal_indices]}")
@@ -729,6 +733,9 @@ def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
     param_grid = {'C': [0.1, 1, 10, 100],
                   'gamma': ['scale', 'auto', 0.01, 0.1],
                   'epsilon': [0.01, 0.05, 0.1, 0.2]}
+    logger.info(f"  [SVR超参数] kernel=rbf, C={param_grid['C']}, gamma={param_grid['gamma']}, "
+                f"epsilon={param_grid['epsilon']} | GridSearchCV(cv=3, scoring=neg_mse) | "
+                f"输入特征数(input_features)={X_train_full.shape[1]} (5个IMF+4因子)")
     svr = SVR(kernel='rbf')
     grid = GridSearchCV(svr, param_grid, cv=3, scoring='neg_mean_squared_error',
                         n_jobs=1, verbose=0)
@@ -930,7 +937,7 @@ def main():
     logger.info("  模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-LSTM / VMD-SVR")
     logger.info("=" * 70)
     logger.info(f"  日志文件: {log_filename}")
-    logger.info("[1/6] 加载数据...")
+    logger.info("[1/8] 加载数据...")
     data_dict = load_or_generate_data()
 
     # Step 2: 初始化结果容器
@@ -943,7 +950,7 @@ def main():
         for material in MATERIALS:
             label = MATERIAL_LABELS[material]
             logger.info("")
-            logger.info(f"[2/6] 处理 {label} ({material})...")
+            logger.info(f"[2/8] 处理 {label} ({material})...")
             df = data_dict[material]
             top4 = get_top_factors(material)
             logger.info(f"  Top-4 影响因子: {top4}")
@@ -956,7 +963,7 @@ def main():
             all_metrics[material] = {}
 
             # --- 模型一: CatBoost ---
-            logger.info(f"  [3/6] 模型一: CatBoost...")
+            logger.info(f"  [3/8] 模型一: CatBoost...")
             y_pred_1, y_test_1, imp_1, model_1 = run_catboost(
                 X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler)
             metrics_1 = evaluate_model(y_test_1, y_pred_1)
@@ -967,7 +974,7 @@ def main():
                          f"MAE={metrics_1['MAE']:.4f} R^2={metrics_1['R2']:.4f}")
 
             # --- 模型二: VMD-CatBoost ---
-            logger.info(f"  [4/6] 模型二: VMD-CatBoost...")
+            logger.info(f"  [4/8] 模型二: VMD-CatBoost...")
             y_pred_2, y_test_2, imp_2, omega_2, u_2, model_2 = run_vmd_catboost(
                 X_train_factors, y_train, X_test_factors, y_test,
                 material, demand_scaler)
@@ -982,7 +989,7 @@ def main():
             plot_vmd_decomposition(y_train, u_2, omega_2, material)
 
             # --- 模型三: VMD-LSTM-CatBoost ---
-            logger.info(f"  [5/6] 模型三: VMD-LSTM-CatBoost...")
+            logger.info(f"  [5/8] 模型三: VMD-LSTM-CatBoost...")
             y_pred_3, y_test_3, imp_3, omega_3, u_3, model_3 = run_vmd_lstm_catboost(
                 X_train_factors, y_train, X_test_factors, y_test,
                 material, demand_scaler)
@@ -994,7 +1001,7 @@ def main():
                          f"MAE={metrics_3['MAE']:.4f} R^2={metrics_3['R2']:.4f}")
 
             # --- 模型四: VMD-LSTM（直接求和消融实验）---
-            logger.info(f"  [6/7] 模型四: VMD-LSTM(直接求和)...")
+            logger.info(f"  [6/8] 模型四: VMD-LSTM(直接求和)...")
             y_pred_4, y_test_4, imp_4, omega_4, u_4, model_4 = run_vmd_lstm_direct_sum(
                 X_train_factors, y_train, X_test_factors, y_test,
                 material, demand_scaler)
