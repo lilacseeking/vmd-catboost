@@ -6,7 +6,11 @@
       "Bash(python *)",
       "Bash(rm -rf C:/Users/lilacseeking/.matplotlib/fontlist-v330.json)",
       "Bash(rm -rf \"C:/Users/lilacseeking/.matplotlib/fontlist\"*)",
-      "Read(//c/Users/lilacseeking/.matplotlib/**)"
+      "Read(//c/Users/lilacseeking/.matplotlib/**)",
+      "Bash(git push *)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)",
+      "Bash(git checkout *)"
     ]
   }
 }
