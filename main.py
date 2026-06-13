@@ -383,29 +383,27 @@ def extrapolate_imfs(imfs_train, n_test, method='persistence'):
 
 # ===================== 5. LSTM 模型定义 =====================
 class MultiFeatureLSTM(nn.Module):
-    """多特征LSTM: 残差分量+4因子 → 预测值（小样本优化）"""
-    def __init__(self, input_size=5, hidden_size=12, dropout=0.5):
+    """多特征LSTM: 残差分量+4因子 → 预测值（小样本过拟合优化）"""
+    def __init__(self, input_size=5, hidden_size=6):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True)
-        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(self.dropout(out[:, -1, :]))
+        return self.fc(out[:, -1, :])
 
 
 class SingleFeatureLSTM(nn.Module):
-    """单特征LSTM: 单个模态分量 → 预测值（小样本优化）"""
-    def __init__(self, hidden_size=8, dropout=0.5):
+    """单特征LSTM: 单个模态分量 → 预测值（小样本过拟合优化）"""
+    def __init__(self, hidden_size=4):
         super().__init__()
         self.lstm = nn.LSTM(1, hidden_size, num_layers=1, batch_first=True)
-        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(self.dropout(out[:, -1, :]))
+        return self.fc(out[:, -1, :])
 
 
 def create_sequences(data, seq_len=SEQ_LEN):
@@ -419,30 +417,30 @@ def create_sequences(data, seq_len=SEQ_LEN):
     return np.array(X), np.array(y_list)
 
 
-def train_lstm_model(model, X, y, epochs=400, patience=50, lr=0.005):
-    """训练LSTM模型（小样本优化），返回训练好的模型"""
+def train_lstm_model(model, X, y, epochs=400, patience=50, lr=0.005, weight_decay=1e-4):
+    """训练LSTM模型（小样本过拟合优化），返回训练好的模型"""
     model = model.to(DEVICE)
     X_t = torch.FloatTensor(X).to(DEVICE)
     y_t = torch.FloatTensor(y).to(DEVICE)
 
     if isinstance(model, MultiFeatureLSTM):
-        arch = (f"MultiFeatureLSTM | input_size=5, hidden_size=12, num_layers=1, dropout=0.5 | "
+        arch = (f"MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=1, dropout=0(已移除) | "
                 f"CNN/池化层: 无(本模型不使用卷积/池化)")
-        train_cfg = (f"optimizer=Adam, lr={lr}, epochs={epochs}, patience={patience}, "
+        train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
                      f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
                      f"训练样本数(train_samples)={len(X)}, 序列长度(seq_len)={X.shape[1]}")
         logger.info(f"  [LSTM架构] {arch}")
         logger.info(f"  [训练配置] {train_cfg}")
     elif isinstance(model, SingleFeatureLSTM):
-        arch = (f"SingleFeatureLSTM | hidden_size=8, num_layers=1, dropout=0.5 | "
+        arch = (f"SingleFeatureLSTM | hidden_size=4, num_layers=1, dropout=0(已移除) | "
                 f"CNN/池化层: 无(本模型不使用卷积/池化)")
-        train_cfg = (f"optimizer=Adam, lr={lr}, epochs={epochs}, patience={patience}, "
+        train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
                      f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
                      f"训练样本数(train_samples)={len(X)}, 序列长度(seq_len)={X.shape[1]}")
         logger.debug(f"  [LSTM架构] {arch}")
         logger.debug(f"  [训练配置] {train_cfg}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.MSELoss()
 
     best_loss = float('inf')
@@ -581,7 +579,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
     X_r_test, _ = create_sequences(residual_features_full, seq_len)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=12, dropout=0.5)
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
 
     mf_model.eval()
@@ -600,7 +598,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len)
 
-        sf_model = SingleFeatureLSTM(hidden_size=8, dropout=0.5)
+        sf_model = SingleFeatureLSTM(hidden_size=4)
         sf_model = train_lstm_model(sf_model, X_m, y_m)
 
         sf_model.eval()
@@ -677,7 +675,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     X_r, y_r = create_sequences(residual_features_train, seq_len)
     X_r_test, _ = create_sequences(residual_features_full, seq_len)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=12, dropout=0.5)
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
 
     mf_model.eval()
@@ -695,7 +693,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len)
 
-        sf_model = SingleFeatureLSTM(hidden_size=8, dropout=0.5)
+        sf_model = SingleFeatureLSTM(hidden_size=4)
         sf_model = train_lstm_model(sf_model, X_m, y_m)
 
         sf_model.eval()
