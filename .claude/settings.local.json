@@ -14,7 +14,9 @@
       "mcp__codegraph__codegraph_files",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git pull *)"
+      "Bash(git pull *)",
+      "Bash(grep -E \"\\(MSE=|模型性能排序|1st|2nd|3rd\\)\" \"outputs/logs/$\\(ls -t outputs/logs/)",
+      "Bash(grep -E \"\\(MSE=|模型性能排序|1st|2nd|3rd\\)\" \"C:/Users/lilacseeking/PycharmProjects/vmd-catboost/outputs/logs/$\\(ls -t C:/Users/lilacseeking/PycharmProjects/vmd-catboost/outputs/logs/)"
     ]
   }
 }

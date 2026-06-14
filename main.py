@@ -443,7 +443,7 @@ def filter_imfs_by_correlation(imfs, signal, corr_threshold=0.1):
 
 # ===================== 5. LSTM 模型定义 =====================
 class MultiFeatureLSTM(nn.Module):
-    """多特征LSTM: 残差分量+4因子 → 预测值（小样本过拟合优化: dropout+小hidden）"""
+    """多特征LSTM: 残差分量+4因子 → 预测值（单向LSTM+dropout）"""
     def __init__(self, input_size=5, hidden_size=4, dropout=0.3):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True, dropout=0)
@@ -457,7 +457,7 @@ class MultiFeatureLSTM(nn.Module):
 
 
 class SingleFeatureLSTM(nn.Module):
-    """单特征LSTM: 单个模态分量 → 预测值（小样本过拟合优化: dropout+小hidden）"""
+    """单特征LSTM: 单个模态分量 → 预测值（单向LSTM+dropout）"""
     def __init__(self, hidden_size=3, dropout=0.3):
         super().__init__()
         self.lstm = nn.LSTM(1, hidden_size, num_layers=1, batch_first=True, dropout=0)
@@ -492,7 +492,7 @@ def train_lstm_model(model, X, y, epochs=400, patience=30, lr=0.003, weight_deca
     y_t = torch.FloatTensor(y).to(DEVICE)
 
     if isinstance(model, MultiFeatureLSTM):
-        arch = (f"MultiFeatureLSTM | input_size=5, hidden_size=4, num_layers=1, dropout=0.3 | "
+        arch = (f"MultiFeatureLSTM | input_size=5, hidden_size=4, num_layers=1, dropout=0.3, ReduceLROnPlateau | "
                 f"CNN/池化层: 无(本模型不使用卷积/池化)")
         train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
                      f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
@@ -500,7 +500,7 @@ def train_lstm_model(model, X, y, epochs=400, patience=30, lr=0.003, weight_deca
         logger.info(f"  [LSTM架构] {arch}")
         logger.info(f"  [训练配置] {train_cfg}")
     elif isinstance(model, SingleFeatureLSTM):
-        arch = (f"SingleFeatureLSTM | hidden_size=3, num_layers=1, dropout=0.3 | "
+        arch = (f"SingleFeatureLSTM | hidden_size=3, num_layers=1, dropout=0.3, ReduceLROnPlateau | "
                 f"CNN/池化层: 无(本模型不使用卷积/池化)")
         train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
                      f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
@@ -509,11 +509,14 @@ def train_lstm_model(model, X, y, epochs=400, patience=30, lr=0.003, weight_deca
         logger.debug(f"  [训练配置] {train_cfg}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
+        factor=0.5, patience=15, min_lr=1e-5)
     criterion = nn.MSELoss()
 
     best_loss = float('inf')
     best_state = None
     counter = 0
+    plateau_counter = 0
 
     for epoch in range(epochs):
         model.train()
@@ -522,6 +525,8 @@ def train_lstm_model(model, X, y, epochs=400, patience=30, lr=0.003, weight_deca
         loss = criterion(pred, y_t)
         loss.backward()
         optimizer.step()
+
+        scheduler.step(loss.item())
 
         if loss.item() < best_loss:
             best_loss = loss.item()
@@ -542,7 +547,7 @@ def train_lstm_model(model, X, y, epochs=400, patience=30, lr=0.003, weight_deca
 
 # ===================== 6. 模型一: CatBoost =====================
 def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler):
-    """模型一: 直接使用4个影响因子，CatBoost回归预测"""
+    """模型一: 直接使用影响因子+特征工程，CatBoost回归预测"""
     iters = 2000 if material == 'arrester' else 1500
     depth = 8 if material == 'arrester' else 6
     lr = 0.01 if material == 'arrester' else 0.02
