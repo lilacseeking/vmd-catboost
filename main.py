@@ -112,6 +112,7 @@ FACTOR_LABELS = {'load_growth': '负荷增长量(分)', 'investment': '工程投
 VMD_K = 5
 VMD_ALPHA = 2000
 SEQ_LEN = 6
+SLIDING_STRIDE = 2  # 滑动窗口步长(stride < seq_len)，创建重叠窗口扩充LSTM训练样本
 RANDOM_SEED = 42
 OUTPUT_DIR = 'outputs/figures'
 LOG_DIR = 'outputs/logs'
@@ -258,15 +259,15 @@ def _generate_all_data(months):
 
     # ====================================================================
     # 10kv交流避雷器
-    # 需求: 干季(11-3月)为0；雨季双峰: 5月(雷雨季开始)+8月(台风+雷暴高发)
+    # 需求: 1-3月、7-9月为淡季(零值); 4-6月(春夏季雷雨高峰)和10-12月(秋冬季检修高峰)为旺季
     # 因子: lightning_count(#1), typhoon_count(#2), rainstorm_count(#3), load_growth(#4)
     # ====================================================================
-    arr_low = np.isin(t % 12, [0, 1, 2, 10, 11])
-    # 双高斯峰结构: 5月(μ=4)和8月(μ=7)
+    arr_low = np.isin(t % 12, [0, 1, 2, 6, 7, 8])  # 1-3月 + 7-9月 → 淡季零值
+    # 双高斯峰结构: 4-6月(中心=5月) 和 10-12月(中心=11月)
     month_in_year = t % 12
-    peak_may = np.exp(-0.5 * ((month_in_year - 4) / 1.2) ** 2)  # 5月 峰值
-    peak_aug = np.exp(-0.5 * ((month_in_year - 7) / 1.0) ** 2)  # 8月 峰值(更高)
-    seasonal_dual = peak_may * 18 + peak_aug * 22  # 8月峰值高于5月
+    peak_spring = np.exp(-0.5 * ((month_in_year - 4) / 1.2) ** 2)  # 4-6月高峰
+    peak_winter = np.exp(-0.5 * ((month_in_year - 10) / 1.2) ** 2)  # 10-12月高峰
+    seasonal_dual = peak_spring * 20 + peak_winter * 20
     arr_raw = 70 + seasonal_dual + 0.08 * t + np.random.randn(n) * 4
     arr_demand = np.where(arr_low, 0, np.clip(np.round(arr_raw), 55, 105))
     arr_demand = np.maximum(arr_demand, 0)
@@ -311,7 +312,7 @@ def load_or_generate_data():
         return data_dict
 
     logger.info("数据文件不存在，根据数据生成要求生成模拟数据...")
-    months = pd.date_range('2022-01-01', periods=36, freq='MS')
+    months = pd.date_range('2020-01-01', periods=60, freq='MS')
     data_dict = _generate_all_data(months)
 
     with pd.ExcelWriter(DATA_FILE, engine='openpyxl') as writer:
@@ -338,7 +339,7 @@ def get_top_factors(material):
 
 # ===================== 3. 数据预处理 =====================
 def preprocess_data(df, material):
-    """MinMax归一化 + 时序分割(前24月train, 后12月test)"""
+    """MinMax归一化 + 时序分割(前48月train, 后12月test)"""
     top4 = get_top_factors(material)
     cols = ['demand'] + top4
     data = df[cols].values.astype(np.float64)
@@ -346,7 +347,7 @@ def preprocess_data(df, material):
     scaler = MinMaxScaler()
     data_scaled = scaler.fit_transform(data)
 
-    train_raw, test_raw = data_scaled[:24], data_scaled[24:]
+    train_raw, test_raw = data_scaled[:48], data_scaled[48:]
     y_train = train_raw[:, 0].copy()
     X_train_factors = train_raw[:, 1:].copy()
     y_test = test_raw[:, 0].copy()
@@ -381,6 +382,48 @@ def extrapolate_imfs(imfs_train, n_test, method='persistence'):
     raise ValueError(f"Unknown method: {method}")
 
 
+def vmd_optimize_k(signal, k_range=range(3, 8), alpha=VMD_ALPHA, freq_ratio_threshold=1.5):
+    """通过中心频率分离度确定最优K值，避免过分解或欠分解
+
+    对 K=3~7 逐一尝试VMD分解，检查最终中心频率的分离度：
+    - 若相邻中心频率比值均 > freq_ratio_threshold，说明分解充分，尝试更大K
+    - 若出现频率混叠（比值过小），说明过分解，停止并返回上一个有效K
+    """
+    best_k = 3
+    for k in k_range:
+        try:
+            u, u_hat, omega = VMD(signal, alpha, 0, k, 0, 1, 1e-7)
+            final_freqs = np.sort(omega[-1])
+            if len(final_freqs) >= 2:
+                ratios = final_freqs[1:] / (final_freqs[:-1] + 1e-10)
+                if np.all(ratios > freq_ratio_threshold):
+                    best_k = k
+                else:
+                    break
+            else:
+                best_k = k
+        except Exception:
+            break
+    logger.debug(f"  [VMD优化] 最优K={best_k} (搜索范围{list(k_range)}, 频率分离阈值={freq_ratio_threshold})")
+    return best_k
+
+
+def filter_imfs_by_correlation(imfs, signal, corr_threshold=0.1):
+    """对分解后的IMF做相关性分析，剔除与原序列相关度 < corr_threshold 的噪声分量
+
+    返回应保留的IMF索引列表。若筛选后不足2个，退回保留相关度最高的两个。
+    """
+    n_imfs = imfs.shape[0]
+    corrs = [abs(np.corrcoef(imfs[i], signal)[0, 1]) for i in range(n_imfs)]
+    keep_idx = [i for i, c in enumerate(corrs) if c >= corr_threshold]
+    if len(keep_idx) < 2:
+        keep_idx = np.argsort(corrs)[-2:].tolist()
+    dropped = [i for i in range(n_imfs) if i not in keep_idx]
+    if dropped:
+        logger.debug(f"  [IMF筛选] 剔除IMF{dropped} (相关度<{corr_threshold}), 保留IMF{keep_idx}")
+    return keep_idx
+
+
 # ===================== 5. LSTM 模型定义 =====================
 class MultiFeatureLSTM(nn.Module):
     """多特征LSTM: 残差分量+4因子 → 预测值（小样本过拟合优化）"""
@@ -406,12 +449,16 @@ class SingleFeatureLSTM(nn.Module):
         return self.fc(out[:, -1, :])
 
 
-def create_sequences(data, seq_len=SEQ_LEN):
-    """构建时间窗口序列 X:(n, seq_len, features), y:(n,)"""
+def create_sequences(data, seq_len=SEQ_LEN, stride=1):
+    """构建时间窗口序列 X:(n, seq_len, features), y:(n,)
+
+    stride < seq_len 时创建重叠窗口，扩充LSTM训练样本量。
+    例如 seq_len=6, stride=2 → 相邻窗口重叠4个时间步，样本数 ≈ (N-seq_len)/stride
+    """
     if data.ndim == 1:
         data = data.reshape(-1, 1)
     X, y_list = [], []
-    for i in range(len(data) - seq_len):
+    for i in range(0, len(data) - seq_len, stride):
         X.append(data[i:i + seq_len])
         y_list.append(data[i + seq_len, 0])
     return np.array(X), np.array(y_list)
@@ -488,7 +535,7 @@ def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, dem
         random_seed=RANDOM_SEED, verbose=0
     )
     # 时序验证集: 前18月训练, 后6月(第19-24月)作为早停验证
-    n_val = min(6, len(y_train) // 4)
+    n_val = min(12, len(y_train) // 4)
     X_tr, X_val = X_train_factors[:-n_val], X_train_factors[-n_val:]
     y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
     model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
@@ -507,14 +554,21 @@ def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, dem
 def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
                      material, demand_scaler):
     """模型二: VMD(仅训练集) → IMF外推 → 全部分量+4因子 → CatBoost"""
-    # VMD 仅对训练集需求量进行分解，避免 Look-Ahead Bias
-    u, _, omega, _, _ = vmd_decompose_full(y_train)  # (5, 24)
+    # VMD K值优化 + 仅对训练集需求量进行分解，避免 Look-Ahead Bias
+    opt_k = vmd_optimize_k(y_train)
+    logger.info(f"  [VMD-CatBoost] VMD最优K={opt_k}")
+    u_full, _, omega, _, _ = vmd_decompose_full(y_train, K=opt_k)  # (opt_k, 48)
 
-    imfs_train = u.T   # (24, 5)
-    # 测试期 IMF 通过 persistence 外推（无未来数据泄露）
+    # IMF 相关性筛选
+    keep_idx = filter_imfs_by_correlation(u_full, y_train)
+    u_filtered = u_full[keep_idx]  # 仅保留有效IMF
+    n_imfs_kept = len(keep_idx)
+    logger.info(f"  [VMD-CatBoost] IMF筛选: {opt_k}→{n_imfs_kept}个 (保留{keep_idx})")
+
+    imfs_train = u_filtered.T   # (48, n_imfs_kept)
     imfs_test = extrapolate_imfs(imfs_train, len(y_test))
 
-    # 拼接特征: IMFs + 4个影响因子
+    # 拼接特征: 筛选后IMFs + 4个影响因子
     X_train_full = np.column_stack([imfs_train, X_train_factors])
     X_test_full = np.column_stack([imfs_test, X_test_factors])
 
@@ -523,7 +577,7 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
         loss_function='RMSE', early_stopping_rounds=30,
         random_seed=RANDOM_SEED, verbose=0
     )
-    n_val = min(6, len(y_train) // 4)
+    n_val = min(12, len(y_train) // 4)
     X_tr, X_val = X_train_full[:-n_val], X_train_full[-n_val:]
     y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
     model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
@@ -534,31 +588,46 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
     y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
     y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
 
-    return y_pred_orig, y_test_orig, importance, omega, u, model
+    return y_pred_orig, y_test_orig, importance, omega, u_full, model
 
 
 # ===================== 8. 模型三: VMD-LSTM-CatBoost =====================
 def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
                           material, demand_scaler):
-    """模型三: VMD(仅训练集) → 残差多特征LSTM + 4模态单特征LSTM → CatBoost融合"""
+    """模型三: VMD(仅训练集) → 残差多特征LSTM + N模态单特征LSTM → CatBoost融合"""
     seq_len = SEQ_LEN
     top4 = get_top_factors(material)
 
-    # 1. VMD 仅对训练集分解，避免 Look-Ahead Bias
-    u, _, omega, residual_idx, modal_indices = vmd_decompose_full(y_train)  # (5, 24)
-    logger.debug(f"    VMD分解: 残差=IMF{residual_idx+1}, 模态={[f'IMF{i+1}' for i in modal_indices]}")
+    # 1. VMD K值优化 + 仅对训练集分解，避免 Look-Ahead Bias
+    opt_k = vmd_optimize_k(y_train)
+    logger.info(f"  [VMD-LSTM-CatBoost] VMD最优K={opt_k}")
+    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k)
+
+    # 2. IMF相关性筛选（始终保留残差/最低频分量）
+    keep_idx = filter_imfs_by_correlation(u_full, y_train)
+    if residual_idx not in keep_idx:
+        keep_idx = sorted(set(keep_idx) | {residual_idx})
+    keep_idx = sorted(keep_idx)
+    # 重映射到筛选后数组的索引
+    old_to_new = {old: new for new, old in enumerate(keep_idx)}
+    residual_idx_new = old_to_new[residual_idx]
+    modal_indices = [old_to_new[i] for i in all_modal_indices if i in keep_idx]
+    u = u_full[keep_idx]  # 仅保留筛选后IMF
+    n_imfs = len(keep_idx)
+    logger.info(f"  [VMD-LSTM-CatBoost] IMF筛选: {opt_k}→{n_imfs}个 | 残差=IMF{residual_idx+1}(新idx={residual_idx_new}), "
+                f"模态={[f'IMF{list(keep_idx)[i]+1}' for i in range(n_imfs) if i != residual_idx_new]}")
 
     # 测试期 IMF 通过 persistence 外推
-    imfs_test_ext = extrapolate_imfs(u.T, len(y_test))  # (12, 5)
-    u_train = u  # (5, 24)
-    u_test = imfs_test_ext.T  # (5, 12)
+    imfs_test_ext = extrapolate_imfs(u.T, len(y_test))  # (12, n_imfs)
+    u_train = u  # (n_imfs, 48)
+    u_test = imfs_test_ext.T  # (n_imfs, 12)
 
     lstm_preds_train = []
     lstm_preds_test = []
 
-    # 2. 残差分量 → 多特征LSTM
-    residual_train = u_train[residual_idx]  # (24,)
-    residual_test = u_test[residual_idx]    # (12,)
+    # 3. 残差分量 → 多特征LSTM
+    residual_train = u_train[residual_idx_new]  # (48,)
+    residual_test = u_test[residual_idx_new]    # (12,)
 
     # 构建多特征输入：残差 + 4因子
     residual_features_train = np.column_stack([
@@ -570,14 +639,14 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         X_test_factors[:, 2], X_test_factors[:, 3]
     ])
 
-    X_r, y_r = create_sequences(residual_features_train, seq_len)
+    X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
     # 测试序列需要包含训练集尾部以构建窗口
     residual_full_seq = np.concatenate([residual_train[-seq_len:], residual_test])
     factor_full_seqs = []
     for j in range(4):
         factor_full_seqs.append(np.concatenate([X_train_factors[-seq_len:, j], X_test_factors[:, j]]))
     residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
-    X_r_test, _ = create_sequences(residual_features_full, seq_len)
+    X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
     mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
@@ -589,14 +658,14 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     lstm_preds_train.append(pred_r_train)
     lstm_preds_test.append(pred_r_test)
 
-    # 3. 4个模态分量 → 单特征LSTM
+    # 4. N个模态分量 → 单特征LSTM（数量由VMD优化K和IMF筛选决定）
     for idx in modal_indices:
         modal_train = u_train[idx]
         modal_test = u_test[idx]
         modal_full = np.concatenate([modal_train[-seq_len:], modal_test])
 
-        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len)
-        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len)
+        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
+        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
         sf_model = SingleFeatureLSTM(hidden_size=4)
         sf_model = train_lstm_model(sf_model, X_m, y_m)
@@ -608,8 +677,8 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         lstm_preds_train.append(pred_m_train)
         lstm_preds_test.append(pred_m_test)
 
-    # 4. CatBoost 融合
-    # 输入：5个LSTM预测值 + 4个影响因子 = 9维
+    # 5. CatBoost 融合
+    # 输入：N个LSTM预测值(1残差+N模态) + 4个影响因子
     fusion_train = np.column_stack(lstm_preds_train + [X_train_factors[seq_len:]])
     fusion_test = np.column_stack(lstm_preds_test + [X_test_factors])
 
@@ -618,7 +687,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         loss_function='RMSE', early_stopping_rounds=20,
         random_seed=RANDOM_SEED, verbose=0
     )
-    n_fusion_val = min(6, len(y_train[seq_len:]) // 3)
+    n_fusion_val = min(12, len(y_train[seq_len:]) // 3)
     fusion_model.fit(fusion_train, y_train[seq_len:],
                      eval_set=(fusion_train[-n_fusion_val:], y_train[seq_len:][-n_fusion_val:]))
 
@@ -632,13 +701,13 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     y_test_orig = demand_scaler.inverse_transform(y_test_aligned.reshape(-1, 1)).flatten()
     y_pred_orig = demand_scaler.inverse_transform(y_pred_fusion.reshape(-1, 1)).flatten()
 
-    return y_pred_orig, y_test_orig, importance, omega, u, fusion_model
+    return y_pred_orig, y_test_orig, importance, omega, u_full, fusion_model
 
 
 # ===================== 9. 模型四: VMD-LSTM（直接求和） =====================
 def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
                             material, demand_scaler):
-    """模型四: VMD → 5个LSTM预测各分量 → 直接求和（无CatBoost融合层）
+    """模型四: VMD → N个LSTM预测各分量 → 直接求和（无CatBoost融合层）
 
     消融实验: 对比 VMD-LSTM 与 VMD-LSTM-CatBoost，验证 CatBoost 融合层的必要性。
     VMD 分解满足 Σ(IMF_i) = 原始信号，直接求和有物理依据。
@@ -646,38 +715,50 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     seq_len = SEQ_LEN
     top4 = get_top_factors(material)
 
-    logger.info(f"  [VMD-LSTM直接求和架构] VMD(K={VMD_K}) → 1×MultiFeatureLSTM(hidden=6) + "
-                f"4×SingleFeatureLSTM(hidden=4) → 直接求和 | "
+    # 1. VMD K值优化 + 仅对训练集分解
+    opt_k = vmd_optimize_k(y_train)
+    logger.info(f"  [VMD-LSTM直接求和] VMD最优K={opt_k} → 1×MultiFeatureLSTM(hidden=6) + "
+                f"N×SingleFeatureLSTM(hidden=4) → 直接求和 | "
                 f"序列长度(seq_len)={seq_len}, 输入特征数(input_features)=4(top-4因子)")
+    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k)
 
-    # 1. VMD 仅对训练集分解
-    u, _, omega, residual_idx, modal_indices = vmd_decompose_full(y_train)
-    logger.debug(f"    VMD分解: 残差=IMF{residual_idx+1}, 模态={[f'IMF{i+1}' for i in modal_indices]}")
+    # 2. IMF相关性筛选（始终保留残差/最低频分量）
+    keep_idx = filter_imfs_by_correlation(u_full, y_train)
+    if residual_idx not in keep_idx:
+        keep_idx = sorted(set(keep_idx) | {residual_idx})
+    keep_idx = sorted(keep_idx)
+    old_to_new = {old: new for new, old in enumerate(keep_idx)}
+    residual_idx_new = old_to_new[residual_idx]
+    modal_indices = [old_to_new[i] for i in all_modal_indices if i in keep_idx]
+    u = u_full[keep_idx]
+    n_imfs = len(keep_idx)
+    logger.info(f"  [VMD-LSTM直接求和] IMF筛选: {opt_k}→{n_imfs}个 | 残差=IMF{residual_idx+1}(新idx={residual_idx_new}), "
+                f"模态={[f'IMF{list(keep_idx)[i]+1}' for i in range(n_imfs) if i != residual_idx_new]}")
 
-    u_train = u  # (5, 24)
+    u_train = u  # (n_imfs, 48)
     imfs_test_ext = extrapolate_imfs(u.T, len(y_test))
-    u_test = imfs_test_ext.T  # (5, 12)
+    u_test = imfs_test_ext.T  # (n_imfs, 12)
 
     lstm_preds_train = []
     lstm_preds_test = []
 
-    # 2. 残差分量 → 多特征LSTM
-    residual_train = u_train[residual_idx]
+    # 3. 残差分量 → 多特征LSTM
+    residual_train = u_train[residual_idx_new]
     residual_features_train = np.column_stack([
         residual_train, X_train_factors[:, 0], X_train_factors[:, 1],
         X_train_factors[:, 2], X_train_factors[:, 3]
     ])
-    residual_full_seq = np.concatenate([residual_train[-seq_len:], u_test[residual_idx]])
+    residual_full_seq = np.concatenate([residual_train[-seq_len:], u_test[residual_idx_new]])
     factor_full_seqs = [np.concatenate([X_train_factors[-seq_len:, j], X_test_factors[:, j]])
                         for j in range(4)]
     residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
     residual_features_test = np.column_stack([
-        u_test[residual_idx], X_test_factors[:, 0], X_test_factors[:, 1],
+        u_test[residual_idx_new], X_test_factors[:, 0], X_test_factors[:, 1],
         X_test_factors[:, 2], X_test_factors[:, 3]
     ])
 
-    X_r, y_r = create_sequences(residual_features_train, seq_len)
-    X_r_test, _ = create_sequences(residual_features_full, seq_len)
+    X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
+    X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
     mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
@@ -689,13 +770,13 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     lstm_preds_train.append(pred_r_train)
     lstm_preds_test.append(pred_r_test)
 
-    # 3. 4个模态分量 → 单特征LSTM
+    # 4. N个模态分量 → 单特征LSTM（数量由VMD优化K和IMF筛选决定）
     for idx in modal_indices:
         modal_train = u_train[idx]
         modal_full = np.concatenate([modal_train[-seq_len:], u_test[idx]])
 
-        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len)
-        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len)
+        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
+        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
         sf_model = SingleFeatureLSTM(hidden_size=4)
         sf_model = train_lstm_model(sf_model, X_m, y_m)
@@ -707,7 +788,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
         lstm_preds_train.append(pred_m_train)
         lstm_preds_test.append(pred_m_test)
 
-    # 4. 直接求和（VMD 重构特性: ΣIMF = 原始信号）
+    # 5. 直接求和（VMD 重构特性: ΣIMF = 原始信号）
     y_pred_sum_train = np.sum(lstm_preds_train, axis=0)
     y_pred_sum_test = np.sum(lstm_preds_test, axis=0)
 
@@ -717,15 +798,22 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     y_test_orig = demand_scaler.inverse_transform(y_test_aligned.reshape(-1, 1)).flatten()
     y_pred_orig = demand_scaler.inverse_transform(y_pred_sum_test.reshape(-1, 1)).flatten()
 
-    return y_pred_orig, y_test_orig, None, omega, u, None
+    return y_pred_orig, y_test_orig, None, omega, u_full, None
 
 
 # ===================== 10. 模型五: VMD-SVR =====================
 def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
                 material, demand_scaler):
     """模型五: VMD(仅训练集)分解 + SVR核方法端到端预测"""
-    u, _, omega, _, _ = vmd_decompose_full(y_train)
-    imfs_train = u.T
+    opt_k = vmd_optimize_k(y_train)
+    logger.info(f"  [VMD-SVR] VMD最优K={opt_k}")
+    u_full, _, omega, _, _ = vmd_decompose_full(y_train, K=opt_k)
+    keep_idx = filter_imfs_by_correlation(u_full, y_train)
+    u_filtered = u_full[keep_idx]
+    n_imfs_kept = len(keep_idx)
+    logger.info(f"  [VMD-SVR] IMF筛选: {opt_k}→{n_imfs_kept}个 (保留{keep_idx})")
+
+    imfs_train = u_filtered.T
     imfs_test = extrapolate_imfs(imfs_train, len(y_test))
     X_train_full = np.column_stack([imfs_train, X_train_factors])
     X_test_full = np.column_stack([imfs_test, X_test_factors])
@@ -735,7 +823,7 @@ def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
                   'epsilon': [0.01, 0.05, 0.1, 0.2]}
     logger.info(f"  [SVR超参数] kernel=rbf, C={param_grid['C']}, gamma={param_grid['gamma']}, "
                 f"epsilon={param_grid['epsilon']} | GridSearchCV(cv=3, scoring=neg_mse) | "
-                f"输入特征数(input_features)={X_train_full.shape[1]} (5个IMF+4因子)")
+                f"输入特征数(input_features)={X_train_full.shape[1]} ({n_imfs_kept}个IMF+4因子)")
     svr = SVR(kernel='rbf')
     grid = GridSearchCV(svr, param_grid, cv=3, scoring='neg_mean_squared_error',
                         n_jobs=1, verbose=0)
@@ -747,7 +835,7 @@ def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
     y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
     y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
     y_pred_orig = np.maximum(y_pred_orig, 0)  # 物理约束：需求量非负
-    return y_pred_orig, y_test_orig, None, omega, u, grid
+    return y_pred_orig, y_test_orig, None, omega, u_full, grid
 
 
 # ===================== 11. 模型评估 =====================
