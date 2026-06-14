@@ -1,0 +1,17 @@
+13:57:00 | INFO    | ======================================================================
+13:57:00 | INFO    |   配电网物资需求预测 —— VMD-CatBoost 模型对比实验
+13:57:00 | INFO    |   物资: 10KV电缆 / 柱上变压器台成套设备 / 10kv交流避雷器
+13:57:00 | INFO    |   模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-LSTM / VMD-SVR
+13:57:00 | INFO    | ======================================================================
+13:57:00 | INFO    |   日志文件: outputs/logs\main_20260614_135700.log
+13:57:00 | INFO    | [1/8] 加载数据...
+13:57:00 | INFO    | 读取已有数据文件: inputs/data\data.xlsx
+13:57:01 | INFO    |   Sheet[10KV电缆]: 36 条, demand范围=[0.00, 30.00]
+13:57:01 | INFO    |   Sheet[柱上变压器台成套设备]: 36 条, demand范围=[0.00, 15.00]
+13:57:01 | INFO    |   Sheet[10kv交流避雷器]: 36 条, demand范围=[0.00, 99.00]
+13:57:01 | INFO    | 
+13:57:01 | INFO    | [2/8] 处理 10KV电缆 (cable)...
+13:57:01 | INFO    |   Top-4 影响因子: ['investment', 'history_demand', 'load_growth', 'equipment_cost']
+13:57:01 | DEBUG   |   训练集: 36月, 测试集: 0月
+13:57:01 | INFO    |   [3/8] 模型一: CatBoost...
+13:57:01 | INFO    |   [CatBoost超参数] iterations=500, learning_rate=0.03, depth=4, l2_leaf_reg=5, loss_function=RMSE, early_stopping_rounds=30, random_seed=42 | 输入特征数(input_features)=4

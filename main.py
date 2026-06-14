@@ -679,7 +679,9 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
 
     # 5. CatBoost 融合
     # 输入：N个LSTM预测值(1残差+N模态) + 4个影响因子
-    fusion_train = np.column_stack(lstm_preds_train + [X_train_factors[seq_len:]])
+    # 训练集按滑动窗口stride对齐：LSTM训练预测每stride步一个目标
+    train_target_idx = np.arange(seq_len, len(y_train), SLIDING_STRIDE)
+    fusion_train = np.column_stack(lstm_preds_train + [X_train_factors[train_target_idx]])
     fusion_test = np.column_stack(lstm_preds_test + [X_test_factors])
 
     fusion_model = CatBoostRegressor(
@@ -687,9 +689,9 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         loss_function='RMSE', early_stopping_rounds=20,
         random_seed=RANDOM_SEED, verbose=0
     )
-    n_fusion_val = min(12, len(y_train[seq_len:]) // 3)
-    fusion_model.fit(fusion_train, y_train[seq_len:],
-                     eval_set=(fusion_train[-n_fusion_val:], y_train[seq_len:][-n_fusion_val:]))
+    n_fusion_val = min(12, len(train_target_idx) // 3)
+    fusion_model.fit(fusion_train, y_train[train_target_idx],
+                     eval_set=(fusion_train[-n_fusion_val:], y_train[train_target_idx][-n_fusion_val:]))
 
     y_pred_fusion = fusion_model.predict(fusion_test)
     importance = fusion_model.get_feature_importance()
@@ -890,7 +892,8 @@ def plot_prediction_comparison(all_results, material):
 
 def plot_vmd_decomposition(demand_full, u, omega, material):
     """VMD分解可视化：原始信号+5个IMF分量"""
-    fig, axes = plt.subplots(VMD_K + 1, 1, figsize=(14, 10))
+    n_imfs = len(u)  # 实际IMF数量（VMD优化后K值可变）
+    fig, axes = plt.subplots(n_imfs + 1, 1, figsize=(14, 10))
     t = np.arange(len(demand_full))
 
     # 原始信号
@@ -901,11 +904,11 @@ def plot_vmd_decomposition(demand_full, u, omega, material):
 
     # 各IMF分量
     final_freqs = omega[-1]
-    for i in range(VMD_K):
+    for i in range(n_imfs):
         axes[i + 1].plot(t, u[i], linewidth=1)
         axes[i + 1].set_ylabel(f'IMF{i+1}\n(f={final_freqs[i]:.3f})')
         axes[i + 1].grid(True, alpha=0.3)
-        if i == VMD_K - 1:
+        if i == n_imfs - 1:
             axes[i + 1].set_xlabel('月份序号')
 
     plt.tight_layout()
@@ -920,18 +923,25 @@ def plot_feature_importance(importance_dict, material):
     top4 = get_top_factors(material)
     fig, axes = plt.subplots(1, 3, figsize=(20, 5))
 
-    for ax_idx, (model_name, imp, feat_names) in enumerate([
-        ('CatBoost', importance_dict.get('catboost_imp'), top4),
+    for ax_idx, (model_name, imp, feat_name_builder) in enumerate([
+        ('CatBoost', importance_dict.get('catboost_imp'), lambda n: top4),
         ('VMD-CatBoost', importance_dict.get('vmd_catboost_imp'),
-         [f'IMF{i+1}' for i in range(VMD_K)] + top4),
+         lambda n: [f'IMF{i+1}' for i in range(n - len(top4))] + top4),
         ('VMD-LSTM-CatBoost', importance_dict.get('vmd_lstm_catboost_imp'),
-         ['LSTM残差'] + [f'LSTM模态{i+1}' for i in range(VMD_K - 1)] + top4),
+         lambda n: ['LSTM残差'] + [f'LSTM模态{i+1}' for i in range(n - len(top4) - 1)] + top4),
     ]):
         ax = axes[ax_idx]
         if imp is not None and len(imp) > 0:
-            colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(imp)))
-            ax.barh(range(len(imp)), imp, color=colors, edgecolor='navy', alpha=0.85)
-            ax.set_yticks(range(len(imp)))
+            n_features = len(imp)
+            feat_names = feat_name_builder(n_features)
+            # 截断/补齐标签以匹配实际特征数
+            if len(feat_names) > n_features:
+                feat_names = feat_names[:n_features]
+            elif len(feat_names) < n_features:
+                feat_names = [f'F{i+1}' for i in range(n_features)]
+            colors = plt.cm.Blues(np.linspace(0.4, 0.9, n_features))
+            ax.barh(range(n_features), imp, color=colors, edgecolor='navy', alpha=0.85)
+            ax.set_yticks(range(n_features))
             ax.set_yticklabels(feat_names)
             ax.set_xlabel('Importance')
             ax.set_title(f'{model_name} — {MATERIAL_LABELS[material]}', fontweight='bold')

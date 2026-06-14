@@ -10,7 +10,11 @@
       "Bash(git push *)",
       "Bash(gh pr *)",
       "Bash(gh issue *)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "mcp__codegraph__codegraph_files",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git pull *)"
     ]
   }
 }
