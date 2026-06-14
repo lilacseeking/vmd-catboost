@@ -259,15 +259,15 @@ def _generate_all_data(months):
 
     # ====================================================================
     # 10kv交流避雷器
-    # 需求: 1-3月、7-9月为淡季(零值); 4-6月(春夏季雷雨高峰)和10-12月(秋冬季检修高峰)为旺季
+    # 需求: 干季(11-3月)为0；雨季双峰: 5月(雷雨季开始)+8月(台风+雷暴高发)
     # 因子: lightning_count(#1), typhoon_count(#2), rainstorm_count(#3), load_growth(#4)
     # ====================================================================
-    arr_low = np.isin(t % 12, [0, 1, 2, 6, 7, 8])  # 1-3月 + 7-9月 → 淡季零值
-    # 双高斯峰结构: 4-6月(中心=5月) 和 10-12月(中心=11月)
+    arr_low = np.isin(t % 12, [0, 1, 2, 10, 11])
+    # 双高斯峰结构: 5月(μ=4)和8月(μ=7)
     month_in_year = t % 12
-    peak_spring = np.exp(-0.5 * ((month_in_year - 4) / 1.2) ** 2)  # 4-6月高峰
-    peak_winter = np.exp(-0.5 * ((month_in_year - 10) / 1.2) ** 2)  # 10-12月高峰
-    seasonal_dual = peak_spring * 20 + peak_winter * 20
+    peak_may = np.exp(-0.5 * ((month_in_year - 4) / 1.2) ** 2)  # 5月 峰值
+    peak_aug = np.exp(-0.5 * ((month_in_year - 7) / 1.0) ** 2)  # 8月 峰值(更高)
+    seasonal_dual = peak_may * 18 + peak_aug * 22  # 8月峰值高于5月
     arr_raw = 70 + seasonal_dual + 0.08 * t + np.random.randn(n) * 4
     arr_demand = np.where(arr_low, 0, np.clip(np.round(arr_raw), 55, 105))
     arr_demand = np.maximum(arr_demand, 0)
