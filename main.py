@@ -114,6 +114,7 @@ VMD_ALPHA = 2000
 SEQ_LEN = 6
 SLIDING_STRIDE = 2  # 滑动窗口步长(stride < seq_len)，创建重叠窗口扩充LSTM训练样本
 RANDOM_SEED = 42
+DATA_LOCKED = True  # 数据锁定: True=仅读取不重新生成, False=允许自动生成
 OUTPUT_DIR = 'outputs/figures'
 LOG_DIR = 'outputs/logs'
 DATA_DIR = 'inputs/data'
@@ -311,6 +312,8 @@ def load_or_generate_data():
             logger.info(f"  Sheet[{sheet}]: {len(df)} 条, demand范围=[{df['demand'].min():.2f}, {df['demand'].max():.2f}]")
         return data_dict
 
+    if DATA_LOCKED:
+        raise FileNotFoundError(f"数据文件不存在且DATA_LOCKED=True，无法生成数据: {DATA_FILE}")
     logger.info("数据文件不存在，根据数据生成要求生成模拟数据...")
     months = pd.date_range('2020-01-01', periods=60, freq='MS')
     data_dict = _generate_all_data(months)
@@ -339,24 +342,38 @@ def get_top_factors(material):
 
 # ===================== 3. 数据预处理 =====================
 def preprocess_data(df, material):
-    """MinMax归一化 + 时序分割(前48月train, 后12月test)"""
+    """MinMax归一化 + 时序分割(前48月train, 后12月test) + 特征工程"""
     top4 = get_top_factors(material)
     cols = ['demand'] + top4
     data = df[cols].values.astype(np.float64)
+    demand_raw = data[:, 0].copy()
 
-    scaler = MinMaxScaler()
-    data_scaled = scaler.fit_transform(data)
+    # 滞后特征 (t-1, t-2) — 使用原始需求量
+    lag1 = np.roll(demand_raw, 1); lag1[0] = 0
+    lag2 = np.roll(demand_raw, 2); lag2[0] = lag2[1] = 0
 
-    train_raw, test_raw = data_scaled[:48], data_scaled[48:]
-    y_train = train_raw[:, 0].copy()
-    X_train_factors = train_raw[:, 1:].copy()
-    y_test = test_raw[:, 0].copy()
-    X_test_factors = test_raw[:, 1:].copy()
+    # 月份 sin/cos 编码
+    months = df['date'].dt.month.values.astype(np.float64)
+    month_sin = np.sin(2 * np.pi * months / 12)
+    month_cos = np.cos(2 * np.pi * months / 12)
 
-    # 保留原始尺度（反归一化用）
+    # 拼接特征: 原始4因子 + lag1 + lag2 + month_sin + month_cos
+    all_features = np.column_stack([data[:, 1:], lag1, lag2, month_sin, month_cos])
+
+    feature_scaler = MinMaxScaler()
+    features_scaled = feature_scaler.fit_transform(all_features)
+
+    # 需求量单独归一化
     demand_scaler = MinMaxScaler()
-    demand_scaler.fit(df[['demand']].values.astype(np.float64))
+    demand_scaled = demand_scaler.fit_transform(demand_raw.reshape(-1, 1)).flatten()
 
+    X_train_factors = features_scaled[:48].copy()
+    X_test_factors = features_scaled[48:].copy()
+    y_train = demand_scaled[:48].copy()
+    y_test = demand_scaled[48:].copy()
+
+    n_feat = X_train_factors.shape[1]
+    logger.info(f"  [特征工程] 原始{len(top4)}因子 + lag1/lag2 + month_sin/cos = {n_feat}维特征")
     return X_train_factors, y_train, X_test_factors, y_test, demand_scaler
 
 
@@ -426,27 +443,31 @@ def filter_imfs_by_correlation(imfs, signal, corr_threshold=0.1):
 
 # ===================== 5. LSTM 模型定义 =====================
 class MultiFeatureLSTM(nn.Module):
-    """多特征LSTM: 残差分量+4因子 → 预测值（小样本过拟合优化）"""
-    def __init__(self, input_size=5, hidden_size=6):
+    """多特征LSTM: 残差分量+4因子 → 预测值（小样本过拟合优化: dropout+小hidden）"""
+    def __init__(self, input_size=5, hidden_size=4, dropout=0.3):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True, dropout=0)
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :])
+        out = self.dropout(out[:, -1, :])
+        return self.fc(out)
 
 
 class SingleFeatureLSTM(nn.Module):
-    """单特征LSTM: 单个模态分量 → 预测值（小样本过拟合优化）"""
-    def __init__(self, hidden_size=4):
+    """单特征LSTM: 单个模态分量 → 预测值（小样本过拟合优化: dropout+小hidden）"""
+    def __init__(self, hidden_size=3, dropout=0.3):
         super().__init__()
-        self.lstm = nn.LSTM(1, hidden_size, num_layers=1, batch_first=True)
+        self.lstm = nn.LSTM(1, hidden_size, num_layers=1, batch_first=True, dropout=0)
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :])
+        out = self.dropout(out[:, -1, :])
+        return self.fc(out)
 
 
 def create_sequences(data, seq_len=SEQ_LEN, stride=1):
@@ -464,14 +485,14 @@ def create_sequences(data, seq_len=SEQ_LEN, stride=1):
     return np.array(X), np.array(y_list)
 
 
-def train_lstm_model(model, X, y, epochs=400, patience=50, lr=0.005, weight_decay=1e-4):
-    """训练LSTM模型（小样本过拟合优化），返回训练好的模型"""
+def train_lstm_model(model, X, y, epochs=400, patience=30, lr=0.003, weight_decay=1e-3):
+    """训练LSTM模型（小样本过拟合优化: Dropout+高weight_decay+低patience），返回训练好的模型"""
     model = model.to(DEVICE)
     X_t = torch.FloatTensor(X).to(DEVICE)
     y_t = torch.FloatTensor(y).to(DEVICE)
 
     if isinstance(model, MultiFeatureLSTM):
-        arch = (f"MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=1, dropout=0(已移除) | "
+        arch = (f"MultiFeatureLSTM | input_size=5, hidden_size=4, num_layers=1, dropout=0.3 | "
                 f"CNN/池化层: 无(本模型不使用卷积/池化)")
         train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
                      f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
@@ -479,7 +500,7 @@ def train_lstm_model(model, X, y, epochs=400, patience=50, lr=0.005, weight_deca
         logger.info(f"  [LSTM架构] {arch}")
         logger.info(f"  [训练配置] {train_cfg}")
     elif isinstance(model, SingleFeatureLSTM):
-        arch = (f"SingleFeatureLSTM | hidden_size=4, num_layers=1, dropout=0(已移除) | "
+        arch = (f"SingleFeatureLSTM | hidden_size=3, num_layers=1, dropout=0.3 | "
                 f"CNN/池化层: 无(本模型不使用卷积/池化)")
         train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
                      f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
@@ -522,16 +543,16 @@ def train_lstm_model(model, X, y, epochs=400, patience=50, lr=0.005, weight_deca
 # ===================== 6. 模型一: CatBoost =====================
 def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler):
     """模型一: 直接使用4个影响因子，CatBoost回归预测"""
-    # 避雷器数据含大量零值(41.7%), 需要更强拟合能力
-    iters = 800 if material == 'arrester' else 500
-    depth = 6 if material == 'arrester' else 4
-    lr = 0.02 if material == 'arrester' else 0.03
-    logger.info(f"  [CatBoost超参数] iterations={iters}, learning_rate={lr}, depth={depth}, l2_leaf_reg=5, "
-                 f"loss_function=RMSE, early_stopping_rounds=30, random_seed={RANDOM_SEED} | "
+    iters = 2000 if material == 'arrester' else 1500
+    depth = 8 if material == 'arrester' else 6
+    lr = 0.01 if material == 'arrester' else 0.02
+    l2 = 3 if material == 'arrester' else 3
+    logger.info(f"  [CatBoost超参数] iterations={iters}, learning_rate={lr}, depth={depth}, l2_leaf_reg={l2}, "
+                 f"loss_function=RMSE, early_stopping_rounds=50, random_seed={RANDOM_SEED} | "
                  f"输入特征数(input_features)={X_train_factors.shape[1]}")
     model = CatBoostRegressor(
-        iterations=iters, learning_rate=lr, depth=depth, l2_leaf_reg=5,
-        loss_function='RMSE', early_stopping_rounds=30,
+        iterations=iters, learning_rate=lr, depth=depth, l2_leaf_reg=l2,
+        loss_function='RMSE', early_stopping_rounds=50,
         random_seed=RANDOM_SEED, verbose=0
     )
     # 时序验证集: 前18月训练, 后6月(第19-24月)作为早停验证
@@ -573,8 +594,8 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
     X_test_full = np.column_stack([imfs_test, X_test_factors])
 
     model = CatBoostRegressor(
-        iterations=500, learning_rate=0.03, depth=4, l2_leaf_reg=5,
-        loss_function='RMSE', early_stopping_rounds=30,
+        iterations=1500, learning_rate=0.02, depth=6, l2_leaf_reg=3,
+        loss_function='RMSE', early_stopping_rounds=50,
         random_seed=RANDOM_SEED, verbose=0
     )
     n_val = min(12, len(y_train) // 4)
@@ -648,7 +669,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6)
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=4, dropout=0.3)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
 
     mf_model.eval()
@@ -667,7 +688,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureLSTM(hidden_size=4)
+        sf_model = SingleFeatureLSTM(hidden_size=3, dropout=0.3)
         sf_model = train_lstm_model(sf_model, X_m, y_m)
 
         sf_model.eval()
@@ -685,8 +706,8 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     fusion_test = np.column_stack(lstm_preds_test + [X_test_factors])
 
     fusion_model = CatBoostRegressor(
-        iterations=300, learning_rate=0.03, depth=3, l2_leaf_reg=5,
-        loss_function='RMSE', early_stopping_rounds=20,
+        iterations=1000, learning_rate=0.02, depth=5, l2_leaf_reg=3,
+        loss_function='RMSE', early_stopping_rounds=50,
         random_seed=RANDOM_SEED, verbose=0
     )
     n_fusion_val = min(12, len(train_target_idx) // 3)
@@ -719,8 +740,8 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
 
     # 1. VMD K值优化 + 仅对训练集分解
     opt_k = vmd_optimize_k(y_train)
-    logger.info(f"  [VMD-LSTM直接求和] VMD最优K={opt_k} → 1×MultiFeatureLSTM(hidden=6) + "
-                f"N×SingleFeatureLSTM(hidden=4) → 直接求和 | "
+    logger.info(f"  [VMD-LSTM直接求和] VMD最优K={opt_k} → 1×MultiFeatureLSTM(hidden=4,do=0.3) + "
+                f"N×SingleFeatureLSTM(hidden=3,do=0.3) → 直接求和 | "
                 f"序列长度(seq_len)={seq_len}, 输入特征数(input_features)=4(top-4因子)")
     u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k)
 
@@ -762,7 +783,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6)
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=4, dropout=0.3)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
 
     mf_model.eval()
@@ -780,7 +801,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureLSTM(hidden_size=4)
+        sf_model = SingleFeatureLSTM(hidden_size=3, dropout=0.3)
         sf_model = train_lstm_model(sf_model, X_m, y_m)
 
         sf_model.eval()
