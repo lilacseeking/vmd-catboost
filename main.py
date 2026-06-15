@@ -1,6 +1,6 @@
 """
 main.py —— 配电网物资需求预测
-三种模型对比: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost
+三种模型对比: CatBoost / VMD-CatBoost / VMD-Transformer-CatBoost
 三类物资: 10KV电缆(cable) / 柱上变压器台成套设备(transformer) / 10kv交流避雷器(arrester)
 Python 3.12
 
@@ -111,18 +111,19 @@ FACTOR_LABELS = {'load_growth': '负荷增长量(分)', 'investment': '工程投
                  'rainstorm_count': '暴雨(分)'}
 VMD_K = 5
 VMD_ALPHA = 2000
-VMD_ALPHA_MAP = {'cable': 2500, 'transformer': 2500, 'arrester': 2000}
-TF_MULTI_DIM = {'cable': 32, 'transformer': 24, 'arrester': 28}
+VMD_ALPHA_MAP = {'cable': 2500, 'transformer': 2000, 'arrester': 4000}
+TF_MULTI_DIM = {'cable': 32, 'transformer': 24, 'arrester': 32}
 TF_NLAYERS = {'cable': 2, 'transformer': 2, 'arrester': 2}
-TF_LR = {'cable': 0.003, 'transformer': 0.001, 'arrester': 0.003}
-TF_EPOCHS = {'cable': 800, 'transformer': 500, 'arrester': 500}
-TF_SINGLE_DIM = {'cable': 16, 'transformer': 16, 'arrester': 12}
-TF_EPOCHS = {'cable': 500, 'transformer': 500, 'arrester': 500}
-TF_DROPOUT = {'cable': 0.2, 'transformer': 0.2, 'arrester': 0.25}
-TF_SEQ_LEN = {'cable': 6, 'transformer': 6, 'arrester': 6}
+TF_NHEAD = {'cable': 4, 'transformer': 4, 'arrester': 4}
+TF_LR = {'cable': 0.001, 'transformer': 0.0005, 'arrester': 0.001}
+TF_EPOCHS = {'cable': 600, 'transformer': 800, 'arrester': 1000}
+TF_SINGLE_DIM = {'cable': 16, 'transformer': 16, 'arrester': 16}
+TF_DROPOUT = {'cable': 0.25, 'transformer': 0.3, 'arrester': 0.3}
+TF_SEQ_LEN = {'cable': 12, 'transformer': 12, 'arrester': 15}
 VMD_AUTO_K = True  # False=固定K=3, True=自动优化
-SEQ_LEN = 6
-SLIDING_STRIDE = 1  # 滑动窗口步长，stride=1最大化训练样本(42个)
+USE_INFORMER = False  # 短序列(12步)标准注意力优于ProbSparse
+SEQ_LEN = 12
+SLIDING_STRIDE = 1  # 滑动窗口步长，seq_len=12 → 36个训练样本
 RANDOM_SEED = 42
 DATA_LOCKED = True
 OUTPUT_DIR = 'outputs/figures'
@@ -421,17 +422,34 @@ def preprocess_data(df, material):
     data = df[cols].values.astype(np.float64)
     demand_raw = data[:, 0].copy()
 
-    # 滞后特征 (t-1, t-2) — 使用原始需求量
+    # 滞后特征 (t-1, t-2, t-3, t-6, t-12) — 多尺度时序依赖
     lag1 = np.roll(demand_raw, 1); lag1[0] = 0
     lag2 = np.roll(demand_raw, 2); lag2[0] = lag2[1] = 0
+    lag3 = np.roll(demand_raw, 3); lag3[:3] = 0
+    lag6 = np.roll(demand_raw, 6); lag6[:6] = 0
+    lag12 = np.roll(demand_raw, 12); lag12[:12] = 0  # 去年同期
+
+    # 滚动统计特征 (3个月窗口)
+    rolling_mean3 = np.zeros_like(demand_raw)
+    rolling_std3 = np.zeros_like(demand_raw)
+    for i in range(len(demand_raw)):
+        start = max(0, i - 2)
+        window = demand_raw[start:i + 1]
+        rolling_mean3[i] = np.mean(window)
+        rolling_std3[i] = np.std(window) if len(window) > 1 else 0
 
     # 月份 sin/cos 编码
     months = df['date'].dt.month.values.astype(np.float64)
     month_sin = np.sin(2 * np.pi * months / 12)
     month_cos = np.cos(2 * np.pi * months / 12)
 
-    # 拼接特征: 原始4因子 + lag1 + lag2 + month_sin + month_cos
-    all_features = np.column_stack([data[:, 1:], lag1, lag2, month_sin, month_cos])
+    # 拼接特征: 原始4因子 + 5阶滞后 + 2个滚动统计 + month_sin/cos
+    all_features = np.column_stack([
+        data[:, 1:],                    # 4个外部因子
+        lag1, lag2, lag3, lag6, lag12,  # 5阶多尺度滞后
+        rolling_mean3, rolling_std3,    # 2个滚动统计
+        month_sin, month_cos            # 2个月份编码
+    ])
 
     feature_scaler = MinMaxScaler()
     features_scaled = feature_scaler.fit_transform(all_features)
@@ -459,23 +477,32 @@ def vmd_decompose_full(signal, K=VMD_K, alpha=VMD_ALPHA):
     return u, u_hat, omega, residual_idx, modal_indices
 
 
-def extrapolate_imfs(imfs_train, n_test, residual_idx=None, method='persistence'):
+def extrapolate_imfs(imfs_train, n_test, residual_idx=None, method='seasonal_linear'):
     """将训练集IMF外推至测试集长度（避免Look-Ahead Bias）
 
-    - trend_linear: 趋势分量用线性回归外推，模态分量用persistence (默认)
+    - seasonal_linear: 趋势分量线性回归 + 周期分量季节性naive（默认）
+    - seasonal_naive: 季节性naive（复制去年同期值）
     - persistence: 所有分量重复最后一个值
     """
     n_train, K = imfs_train.shape
     result = np.zeros((n_test, K))
     for k in range(K):
-        if method == 'trend_linear' and residual_idx is not None and k == residual_idx:
-            # 线性外推趋势: y = a*t + b
-            t_train = np.arange(n_train)
-            a, b = np.polyfit(t_train, imfs_train[:, k], 1)
-            t_test = np.arange(n_train, n_train + n_test)
-            result[:, k] = a * t_test + b
+        if method in ('seasonal_linear', 'seasonal_naive'):
+            if residual_idx is not None and k == residual_idx:
+                # 趋势分量: 线性外推 y = a*t + b
+                t_train = np.arange(n_train)
+                a, b = np.polyfit(t_train, imfs_train[:, k], 1)
+                t_test = np.arange(n_train, n_train + n_test)
+                result[:, k] = a * t_test + b
+            else:
+                # 模态分量: 季节性naive — 复制去年同期的最后N个周期
+                for i in range(n_test):
+                    src_idx = n_train - 12 + (i % 12)  # 去年同期位置
+                    if src_idx < 0:
+                        src_idx = 0
+                    result[i, k] = imfs_train[src_idx, k]
         else:
-            # 模态分量: persistence
+            # persistence: 所有分量重复最后一个值
             result[:, k] = imfs_train[-1, k]
     return result
 
@@ -540,37 +567,173 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.size(1), :]
 
 
+class ProbSparseAttention(nn.Module):
+    """Informer ProbSparse 自注意力 —— O(L log L) 复杂度
+
+    核心思想：只对"活跃"(注意力分布不均匀)的 top-u 个 Query 计算完整注意力，
+    其余 Query 用 V 的均值替代，将复杂度从 O(L²) 降到 O(L log L)。
+
+    Args:
+        d_model: 特征维度
+        nhead: 注意力头数
+        dropout: dropout 比率
+        factor: 采样因子 (c in paper, default=5)
+    """
+    def __init__(self, d_model, nhead, dropout=0.1, factor=5):
+        super().__init__()
+        assert d_model % nhead == 0, f"d_model({d_model}) 必须能被 nhead({nhead}) 整除"
+        self.d_model = d_model
+        self.nhead = nhead
+        self.d_k = d_model // nhead
+        self.factor = factor
+        self.dropout = nn.Dropout(dropout)
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+    def _prob_QK(self, Q, K, top_k):
+        """计算查询稀疏性度量 M(q_i, K) 并选取 top-u 个活跃查询"""
+        # Q: (B, L_Q, d_model), K: (B, L_K, d_model)
+        B, L_Q, _ = Q.shape
+        L_K = K.shape[1]
+
+        # 采样: 取 K 的子集用于快速估计稀疏性 (Informer Eq.4)
+        U_part = min(self.factor * int(np.ceil(np.log(L_K))), L_K)
+        if U_part >= L_K:
+            # 序列太短，退化为标准注意力
+            return Q, K, torch.ones(B, L_Q, device=Q.device, dtype=torch.bool)
+
+        # 随机采样 K 的子集
+        idx = torch.randperm(L_K, device=Q.device)[:U_part]
+        K_sample = K[:, idx, :]  # (B, U_part, d_model)
+
+        # 计算稀疏性度量: M(q_i, K) = max(q_i·K^T) - mean(q_i·K^T)
+        Q_heads = self.W_q(Q).view(B, L_Q, self.nhead, self.d_k).transpose(1, 2)  # (B, H, L_Q, D)
+        K_sample_heads = self.W_k(K_sample).view(B, U_part, self.nhead, self.d_k).transpose(1, 2)  # (B, H, U_part, D)
+        scale = self.d_k ** 0.5
+        scores_sample = torch.matmul(Q_heads, K_sample_heads.transpose(-2, -1)) / scale  # (B, H, L_Q, U_part)
+        M = scores_sample.max(dim=-1)[0] - scores_sample.mean(dim=-1)  # (B, H, L_Q)
+        M = M.mean(dim=1)  # 跨头平均 → (B, L_Q)
+
+        # 选取 top-u 个活跃查询 (u = c * log L_Q)
+        u = min(self.factor * int(np.ceil(np.log(L_Q))), L_Q)
+        _, top_idx = torch.topk(M, u, dim=-1)  # (B, u)
+        active_mask = torch.zeros(B, L_Q, device=Q.device, dtype=torch.bool)
+        active_mask.scatter_(1, top_idx, True)
+        return Q, K, active_mask
+
+    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        B, L_Q, _ = query.shape
+        L_K = key.shape[1]
+
+        # 获取活跃查询掩码
+        _, _, active_mask = self._prob_QK(query, key, top_k=None)
+
+        # 投影
+        Q = self.W_q(query).view(B, L_Q, self.nhead, self.d_k).transpose(1, 2)  # (B, H, L_Q, D)
+        K = self.W_k(key).view(B, L_K, self.nhead, self.d_k).transpose(1, 2)
+        V = self.W_v(value).view(B, L_K, self.nhead, self.d_k).transpose(1, 2)
+        scale = self.d_k ** 0.5
+
+        # 完整注意力仅对活跃查询计算
+        attn_output = torch.zeros(B, self.nhead, L_Q, self.d_k, device=query.device)
+
+        scores_full = torch.matmul(Q, K.transpose(-2, -1)) / scale  # (B, H, L_Q, L_K)
+        attn_full = torch.softmax(scores_full, dim=-1)
+        attn_full = self.dropout(attn_full)
+
+        # 活跃查询使用完整注意力结果
+        active_h = active_mask.unsqueeze(1).expand(-1, self.nhead, -1)  # (B, H, L_Q)
+        for b in range(B):
+            for h in range(self.nhead):
+                active_q = active_h[b, h]
+                if active_q.any():
+                    attn_output[b, h, active_q] = torch.matmul(
+                        attn_full[b, h, active_q], V[b, h])
+
+        # 非活跃查询用 V 的均值
+        inactive_q = ~active_h
+        if inactive_q.any():
+            V_mean = V.mean(dim=2, keepdim=True).expand(-1, -1, L_Q, -1)  # (B, H, L_Q, D)
+            for b in range(B):
+                for h in range(self.nhead):
+                    if inactive_q[b, h].any():
+                        attn_output[b, h, inactive_q[b, h]] = V_mean[b, h, inactive_q[b, h]]
+
+        # 重组输出
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, L_Q, self.d_model)
+        return self.out_proj(attn_output), None
+
+
+class TransformerEncoderLayer(nn.Module):
+    """Transformer 编码器层 —— 支持标准注意力和 ProbSparse 注意力"""
+    def __init__(self, d_model, nhead, dropout=0.1, use_prob_sparse=False):
+        super().__init__()
+        self.use_prob_sparse = use_prob_sparse
+        if use_prob_sparse:
+            self.self_attn = ProbSparseAttention(d_model, nhead, dropout)
+        else:
+            self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.linear1 = nn.Linear(d_model, d_model * 4)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(d_model * 4, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.activation = nn.ReLU()
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        # Self-attention
+        attn_out, _ = self.self_attn(src, src, src, attn_mask=src_mask,
+                                      key_padding_mask=src_key_padding_mask)
+        src = self.norm1(src + self.dropout1(attn_out))
+        # FFN
+        ffn_out = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = self.norm2(src + self.dropout2(ffn_out))
+        return src
+
+
 class MultiFeatureTransformer(nn.Module):
-    """多特征Transformer: 滑动窗口输入 → 单步预测（全局注意力）"""
-    def __init__(self, input_size=5, hidden_size=32, dropout=0.2, nhead=4, num_layers=2):
+    """多特征Transformer: 滑动窗口输入 → 单步预测（全局注意力）
+
+    支持标准 Transformer 和 Informer ProbSparse 注意力切换。
+    """
+    def __init__(self, input_size=5, hidden_size=32, dropout=0.2, nhead=4, num_layers=2,
+                 use_informer=False):
         super().__init__()
         d_model = hidden_size
         self.input_proj = nn.Linear(input_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model, max_len=100)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead,
-                                                    dropout=dropout, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(d_model, nhead, dropout, use_prob_sparse=use_informer)
+            for _ in range(num_layers)
+        ])
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Sequential(nn.Linear(d_model, d_model//2), nn.ReLU(), nn.Linear(d_model//2, 1))
 
     def forward(self, x):
         x = self.input_proj(x)
         x = self.pos_encoder(x)
-        x = self.encoder(x)
+        for layer in self.layers:
+            x = layer(x)
         x = self.dropout(x[:, -1, :])
         return self.fc(x)
 
 
 class SingleFeatureTransformer(nn.Module):
     """单特征Transformer: 滑动窗口 → 单步预测"""
-    def __init__(self, hidden_size=16, dropout=0.2, nhead=4, num_layers=2):
+    def __init__(self, hidden_size=16, dropout=0.2, nhead=4, num_layers=2,
+                 use_informer=False):
         super().__init__()
         d_model = hidden_size
         self.input_proj = nn.Linear(1, d_model)
         self.pos_encoder = PositionalEncoding(d_model, max_len=100)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead,
-                                                    dropout=dropout, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(d_model, nhead, dropout, use_prob_sparse=use_informer)
+            for _ in range(num_layers)
+        ])
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Sequential(nn.Linear(d_model, max(d_model//2, 4)), nn.ReLU(),
                                 nn.Linear(max(d_model//2, 4), 1))
@@ -578,7 +741,8 @@ class SingleFeatureTransformer(nn.Module):
     def forward(self, x):
         x = self.input_proj(x)
         x = self.pos_encoder(x)
-        x = self.encoder(x)
+        for layer in self.layers:
+            x = layer(x)
         x = self.dropout(x[:, -1, :])
         return self.fc(x)
 
@@ -586,7 +750,7 @@ class SingleFeatureTransformer(nn.Module):
 def create_sequences(data, seq_len=SEQ_LEN, stride=1):
     """构建时间窗口序列 X:(n, seq_len, features), y:(n,)
 
-    stride < seq_len 时创建重叠窗口，扩充LSTM训练样本量。
+    stride < seq_len 时创建重叠窗口，扩充Transformer训练样本量。
     """
     if data.ndim == 1:
         data = data.reshape(-1, 1)
@@ -606,29 +770,81 @@ def create_full_sequence(data, train_len=36, pred_len=12):
     return X, y
 
 
-def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=None, weight_decay=1e-4):
+def hybrid_autoregressive_predict(model, initial_window, n_steps, ar_steps=3,
+                                   factor_seq=None, extrapolated_seq=None):
+    """混合预测: 前ar_steps自回归 + 后续用外推IMF避免误差累积
+
+    纯自回归预测在波动性数据（如避雷器）上会指数级放大误差。
+    混合策略: 前 ar_steps 步使用模型自己的预测值（误差可控），
+    后续步骤使用独立的外推 IMF 值作为输入（误差不累积）。
+
+    model: 训练好的 Transformer 模型
+    initial_window: (seq_len, n_features) 初始输入窗口（来自训练集末尾）
+    n_steps: 预测步数
+    ar_steps: 自回归步数（默认3，前3个月误差累积有限）
+    factor_seq: (n_steps, n_factors) 测试期外部因子序列
+    extrapolated_seq: (n_steps,) 测试期外推 IMF 值（用于 ar_steps 之后的步数）
+    Returns: (n_steps,) 预测值数组
+    """
+    model.eval()
+    window = initial_window.copy()
+    predictions = []
+    with torch.no_grad():
+        for i in range(n_steps):
+            X = torch.FloatTensor(window).unsqueeze(0).to(DEVICE)
+            pred = model(X).item()
+            predictions.append(pred)
+            # 决定用自回归预测值还是外推值更新窗口
+            if i < ar_steps or extrapolated_seq is None:
+                # 自回归模式: 用模型预测值
+                fill_val = pred
+            else:
+                # 外推模式: 用独立外推值，误差不累积
+                fill_val = extrapolated_seq[i]
+            new_row = [fill_val]
+            if factor_seq is not None:
+                new_row.extend(factor_seq[i].tolist())
+            window = np.vstack([window[1:], np.array(new_row)])
+    return np.array(predictions)
+
+
+def train_transformer_model(model, X, y, epochs=1000, patience=60, lr=None, weight_decay=1e-4):
     if lr is None:
         lr = 0.002
-    """训练LSTM模型（2层LSTM+dropout+ReduceLROnPlateau），返回训练好的模型"""
+    """训练Transformer模型（Encoder+Self-Attention+ReduceLROnPlateau），返回训练好的模型"""
     model = model.to(DEVICE)
     X_t = torch.FloatTensor(X).to(DEVICE)
     y_t = torch.FloatTensor(y).to(DEVICE)
 
+    if hasattr(model, 'layers') and len(model.layers) > 0:
+        first_layer = model.layers[0]
+        nlayers = len(model.layers)
+        if hasattr(first_layer, 'use_prob_sparse'):
+            is_informer = first_layer.use_prob_sparse
+            nhead = first_layer.self_attn.nhead if is_informer else first_layer.self_attn.num_heads
+        else:
+            is_informer = False
+            nhead = first_layer.self_attn.num_heads
+    else:
+        nhead, nlayers, is_informer = 4, 2, False
+
+    arch_prefix = "Informer(ProbSparse)" if is_informer else "Transformer(标准注意力)"
+
     if isinstance(model, MultiFeatureTransformer):
-        arch = (f"MultiFeatureTransformer | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | "
-                f"CNN/池化层: 无(本模型不使用卷积/池化)")
+        arch = (f"MultiFeatureTransformer({arch_prefix}) | d_model={model.input_proj.out_features}, "
+                f"nhead={nhead}, num_layers={nlayers}, dropout={model.dropout.p}, ReduceLROnPlateau")
         train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
-                     f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
-                     f"训练样本数(train_samples)={len(X)}, 序列长度(seq_len)={X.shape[1]}")
-        logger.info(f"  [LSTM架构] {arch}")
+                     f"loss=MSELoss, device={DEVICE} | "
+                     f"训练样本数={len(X)}, 序列长度(seq_len)={X.shape[1]}")
+        logger.info(f"  [架构] {arch}")
         logger.info(f"  [训练配置] {train_cfg}")
     elif isinstance(model, SingleFeatureTransformer):
-        arch = (f"SingleFeatureTransformer | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | "
-                f"CNN/池化层: 无(本模型不使用卷积/池化)")
+        arch = (f"SingleFeatureTransformer({arch_prefix}) | d_model={model.input_proj.out_features}, "
+                f"nhead={nhead}, num_layers={nlayers}, dropout={model.dropout.p}, ReduceLROnPlateau")
         train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
-                     f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
-                     f"训练样本数(train_samples)={len(X)}, 序列长度(seq_len)={X.shape[1]}")
-        logger.debug(f"  [LSTM架构] {arch}")
+                     f"loss=MSELoss, device={DEVICE} | "
+                     f"训练样本数={len(X)}, 序列长度(seq_len)={X.shape[1]}")
+        logger.debug(f"  [架构] {arch}")
         logger.debug(f"  [训练配置] {train_cfg}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -639,7 +855,6 @@ def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=None, weight_deca
     best_loss = float('inf')
     best_state = None
     counter = 0
-    plateau_counter = 0
 
     for epoch in range(epochs):
         model.train()
@@ -647,6 +862,7 @@ def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=None, weight_deca
         pred = model(X_t).squeeze()
         loss = criterion(pred, y_t)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         scheduler.step(loss.item())
@@ -658,10 +874,10 @@ def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=None, weight_deca
         else:
             counter += 1
             if counter >= patience:
-                logger.debug(f"  [LSTM收敛] epoch={epoch+1}, best_loss={best_loss:.6f}")
+                logger.debug(f"  [Transformer收敛] epoch={epoch+1}, best_loss={best_loss:.6f}")
                 break
     else:
-        logger.debug(f"  [LSTM收敛] epoch={epochs}(max), best_loss={best_loss:.6f}")
+        logger.debug(f"  [Transformer收敛] epoch={epochs}(max), best_loss={best_loss:.6f}")
 
     model.load_state_dict(best_state)
     model.eval()
@@ -671,7 +887,7 @@ def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=None, weight_deca
 # ===================== 6. 模型一: CatBoost =====================
 def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler):
     """模型一: 仅使用原始4因子(无特征工程)，CatBoost基线回归预测"""
-    # 基线模型只用原始4因子，不用特征工程 → 凸显VMD-LSTM-CatBoost的时序建模优势
+    # 基线模型只用原始4因子，不用特征工程 → 凸显VMD-Transformer-CatBoost的时序建模优势
     X_tr_raw = X_train_factors.copy()  # 全8维特征
     X_te_raw = X_test_factors.copy()
     iters = 1500
@@ -716,7 +932,7 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
     logger.info(f"  [VMD-CatBoost] IMF筛选: {opt_k}→{n_imfs_kept}个 (保留{keep_idx})")
 
     imfs_train = u_filtered.T   # (48, n_imfs_kept)
-    imfs_test = extrapolate_imfs(imfs_train, len(y_test), residual_idx=None, method='persistence')
+    imfs_test = extrapolate_imfs(imfs_train, len(y_test), residual_idx=None, method='seasonal_naive')
 
     # 拼接特征: 筛选后IMFs + 4个影响因子
     X_train_full = np.column_stack([imfs_train, X_train_factors])
@@ -741,144 +957,26 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
     return y_pred_orig, y_test_orig, importance, omega, u_full, model
 
 
-# ===================== 8. 模型三: VMD-LSTM-CatBoost =====================
-def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                          material, demand_scaler):
-    """模型三: VMD(仅训练集) → 残差Transformer + N模态Transformer → CatBoost融合"""
-    np.random.seed(RANDOM_SEED)  # VMD随机隔离
-    seq_len = TF_SEQ_LEN.get(material, SEQ_LEN)
-    top4 = get_top_factors(material)
+# ===================== 8. 模型三: VMD-Transformer-CatBoost =====================
+def run_vmd_transformer_catboost(X_train_factors, y_train, X_test_factors, y_test,
+                                 material, demand_scaler):
+    """模型三: VMD(仅训练集) → 残差Transformer + N模态Transformer → CatBoost融合
 
-    # 1. VMD K值优化 + 仅对训练集分解，避免 Look-Ahead Bias
-    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
-    logger.info(f"  [VMD-LSTM-CatBoost] VMD最优K={opt_k}")
-    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
-
-    # 2. IMF相关性筛选（始终保留残差/最低频分量）
-    keep_idx = filter_imfs_by_correlation(u_full, y_train)
-    if residual_idx not in keep_idx:
-        keep_idx = sorted(set(keep_idx) | {residual_idx})
-    keep_idx = sorted(keep_idx)
-    # 重映射到筛选后数组的索引
-    old_to_new = {old: new for new, old in enumerate(keep_idx)}
-    residual_idx_new = old_to_new[residual_idx]
-    modal_indices = [old_to_new[i] for i in all_modal_indices if i in keep_idx]
-    u = u_full[keep_idx]  # 仅保留筛选后IMF
-    n_imfs = len(keep_idx)
-    logger.info(f"  [VMD-LSTM-CatBoost] IMF筛选: {opt_k}→{n_imfs}个 | 残差=IMF{residual_idx+1}(新idx={residual_idx_new}), "
-                f"模态={[f'IMF{list(keep_idx)[i]+1}' for i in range(n_imfs) if i != residual_idx_new]}")
-
-    # 测试期 IMF 通过 trend_linear 外推（趋势分量线性，模态persistence）
-    imfs_test_ext = extrapolate_imfs(u.T, len(y_test), residual_idx=residual_idx_new)  # (12, n_imfs)
-    u_train = u  # (n_imfs, 48)
-    u_test = imfs_test_ext.T  # (n_imfs, 12)
-
-    lstm_preds_train = []
-    lstm_preds_test = []
-
-    # 3. 残差分量 → 多特征LSTM
-    residual_train = u_train[residual_idx_new]  # (48,)
-    residual_test = u_test[residual_idx_new]    # (12,)
-
-    # 构建多特征输入：残差 + 4因子
-    residual_features_train = np.column_stack([
-        residual_train, X_train_factors[:, 0], X_train_factors[:, 1],
-        X_train_factors[:, 2], X_train_factors[:, 3]
-    ])
-    residual_features_test = np.column_stack([
-        residual_test, X_test_factors[:, 0], X_test_factors[:, 1],
-        X_test_factors[:, 2], X_test_factors[:, 3]
-    ])
-
-    X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
-    residual_full_seq = np.concatenate([residual_train[-seq_len:], residual_test])
-    factor_full_seqs = []
-    for j in range(4):
-        factor_full_seqs.append(np.concatenate([X_train_factors[-seq_len:, j], X_test_factors[:, j]]))
-    residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
-    X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
-
-    mf_hidden = TF_MULTI_DIM[material]
-    sf_hidden = TF_SINGLE_DIM[material]
-    tf_ep = TF_EPOCHS[material]
-    tf_do = TF_DROPOUT[material]
-    mf_model = MultiFeatureTransformer(input_size=5, hidden_size=mf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
-    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=tf_ep, lr=TF_LR.get(material, 0.002))
-
-    mf_model.eval()
-    with torch.no_grad():
-        pred_r_train = mf_model(torch.FloatTensor(X_r).to(DEVICE)).cpu().numpy().flatten()
-        pred_r_test = mf_model(torch.FloatTensor(X_r_test).to(DEVICE)).cpu().numpy().flatten()
-    lstm_preds_train.append(pred_r_train)
-    lstm_preds_test.append(pred_r_test)
-
-    # 4. N个模态分量 → 单特征LSTM（数量由VMD优化K和IMF筛选决定）
-    for idx in modal_indices:
-        modal_train = u_train[idx]
-        modal_test = u_test[idx]
-        modal_full = np.concatenate([modal_train[-seq_len:], modal_test])
-
-        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
-        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
-
-        sf_model = SingleFeatureTransformer(hidden_size=sf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
-        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=tf_ep, lr=TF_LR.get(material, 0.002))
-
-        sf_model.eval()
-        with torch.no_grad():
-            pred_m_train = sf_model(torch.FloatTensor(X_m).to(DEVICE)).cpu().numpy().flatten()
-            pred_m_test = sf_model(torch.FloatTensor(X_m_test).to(DEVICE)).cpu().numpy().flatten()
-        lstm_preds_train.append(pred_m_train)
-        lstm_preds_test.append(pred_m_test)
-
-    # 5. CatBoost 融合
-    # 输入：N个LSTM预测值(1残差+N模态) + 4个影响因子
-    # 训练集按滑动窗口stride对齐：LSTM训练预测每stride步一个目标
-    train_target_idx = np.arange(seq_len, len(y_train), SLIDING_STRIDE)
-    fusion_train = np.column_stack(lstm_preds_train + [X_train_factors[train_target_idx]])
-    fusion_test = np.column_stack(lstm_preds_test + [X_test_factors])
-
-    fusion_model = CatBoostRegressor(
-        iterations=1500, learning_rate=0.015, depth=6, l2_leaf_reg=2,
-        loss_function='RMSE', early_stopping_rounds=50,
-        random_seed=RANDOM_SEED, verbose=0
-    )
-    n_fusion_val = min(12, len(train_target_idx) // 3)
-    fusion_model.fit(fusion_train, y_train[train_target_idx],
-                     eval_set=(fusion_train[-n_fusion_val:], y_train[train_target_idx][-n_fusion_val:]))
-
-    y_pred_fusion = fusion_model.predict(fusion_test)
-    importance = fusion_model.get_feature_importance()
-
-    # 对齐测试集长度
-    effective_test_len = len(y_pred_fusion)
-    y_test_aligned = y_test[-effective_test_len:]
-
-    y_test_orig = demand_scaler.inverse_transform(y_test_aligned.reshape(-1, 1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(y_pred_fusion.reshape(-1, 1)).flatten()
-
-    return y_pred_orig, y_test_orig, importance, omega, u_full, fusion_model
-
-
-# ===================== 9. 模型四: VMD-LSTM（直接求和） =====================
-def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
-                            material, demand_scaler):
-    """模型四: VMD → N个LSTM预测各分量 → 直接求和（无CatBoost融合层）
-
-    消融实验: 对比 VMD-LSTM 与 VMD-LSTM-CatBoost，验证 CatBoost 融合层的必要性。
-    VMD 分解满足 Σ(IMF_i) = 原始信号，直接求和有物理依据。
+    核心策略: seq_len=12(1年全景, 36训练样本) + 季节性外推IMF(无自回归误差累积)。
+    自回归预测在波动性数据上误差爆炸，改为全部使用季节性外推IMF构建测试窗口。
     """
-    seq_len = SEQ_LEN
+    np.random.seed(RANDOM_SEED)
+    seq_len = TF_SEQ_LEN.get(material, SEQ_LEN)
     top4 = get_top_factors(material)
 
     # 1. VMD K值优化 + 仅对训练集分解
     opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
-    logger.info(f"  [VMD-LSTM直接求和] VMD最优K={opt_k} → 1×MultiFeatureTransformer(hidden=8,do=0.25) + "
-                f"N×SingleFeatureTransformer(hidden=6,do=0.25) → 直接求和 | "
-                f"序列长度(seq_len)={seq_len}, 输入特征数(input_features)=4(top-4因子)")
-    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
+    logger.info(f"  [VMD-Transformer-CatBoost] VMD最优K={opt_k}, seq_len={seq_len}, "
+                f"训练样本={48-seq_len}, 无自回归(全外推IMF)")
+    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(
+        y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
 
-    # 2. IMF相关性筛选（始终保留残差/最低频分量）
+    # 2. IMF相关性筛选
     keep_idx = filter_imfs_by_correlation(u_full, y_train)
     if residual_idx not in keep_idx:
         keep_idx = sorted(set(keep_idx) | {residual_idx})
@@ -888,69 +986,219 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     modal_indices = [old_to_new[i] for i in all_modal_indices if i in keep_idx]
     u = u_full[keep_idx]
     n_imfs = len(keep_idx)
-    logger.info(f"  [VMD-LSTM直接求和] IMF筛选: {opt_k}→{n_imfs}个 | 残差=IMF{residual_idx+1}(新idx={residual_idx_new}), "
+    logger.info(f"  [VMD-Transformer-CatBoost] IMF筛选: {opt_k}→{n_imfs}个 | "
+                f"残差=IMF{residual_idx+1}(新idx={residual_idx_new}), "
                 f"模态={[f'IMF{list(keep_idx)[i]+1}' for i in range(n_imfs) if i != residual_idx_new]}")
 
     u_train = u  # (n_imfs, 48)
-    imfs_test_ext = extrapolate_imfs(u.T, len(y_test), residual_idx=residual_idx_new)
+
+    # 季节性外推 IMF：趋势分量线性回归 + 模态分量季节性naive
+    imfs_test_ext = extrapolate_imfs(u_train.T, len(y_test),
+                                     residual_idx=residual_idx_new,
+                                     method='seasonal_linear')  # (12, n_imfs)
     u_test = imfs_test_ext.T  # (n_imfs, 12)
 
-    lstm_preds_train = []
-    lstm_preds_test = []
-
-    # 3. 残差分量 → 多特征LSTM
-    residual_train = u_train[residual_idx_new]
-    residual_features_train = np.column_stack([
-        residual_train, X_train_factors[:, 0], X_train_factors[:, 1],
-        X_train_factors[:, 2], X_train_factors[:, 3]
-    ])
-    residual_full_seq = np.concatenate([residual_train[-seq_len:], u_test[residual_idx_new]])
-    factor_full_seqs = [np.concatenate([X_train_factors[-seq_len:, j], X_test_factors[:, j]])
-                        for j in range(4)]
-    residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
-    residual_features_test = np.column_stack([
-        u_test[residual_idx_new], X_test_factors[:, 0], X_test_factors[:, 1],
-        X_test_factors[:, 2], X_test_factors[:, 3]
-    ])
-
-    X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
-    X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
+    tf_preds_train = []
+    tf_preds_test = []
 
     mf_hidden = TF_MULTI_DIM[material]
     sf_hidden = TF_SINGLE_DIM[material]
     tf_ep = TF_EPOCHS[material]
     tf_do = TF_DROPOUT[material]
-    mf_model = MultiFeatureTransformer(input_size=5, hidden_size=mf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
-    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=tf_ep, lr=TF_LR.get(material, 0.002))
+    tf_nhead = TF_NHEAD.get(material, 4)
+
+    # 3. 残差分量 → MultiFeatureTransformer (残差 + 4因子)
+    residual_train = u_train[residual_idx_new]  # (48,)
+    residual_test = u_test[residual_idx_new]    # (12,) 季节性外推
+
+    residual_features_train = np.column_stack([
+        residual_train, X_train_factors[:, 0], X_train_factors[:, 1],
+        X_train_factors[:, 2], X_train_factors[:, 3]
+    ])  # (48, 5)
+
+    X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
+
+    # 构建测试序列: 用 last seq_len 个训练值 + 外推值 + 测试因子
+    residual_full_seq = np.concatenate([residual_train[-seq_len:], residual_test])
+    factor_full_seqs = [np.concatenate([X_train_factors[-seq_len:, j], X_test_factors[:, j]])
+                        for j in range(4)]
+    residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
+    X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
+
+    logger.debug(f"  [残差Transformer] 训练样本={len(X_r)}, 测试样本={len(X_r_test)}, "
+                 f"X.shape={X_r.shape}")
+
+    mf_model = MultiFeatureTransformer(
+        input_size=5, hidden_size=mf_hidden, dropout=tf_do,
+        nhead=tf_nhead, num_layers=TF_NLAYERS.get(material, 2),
+        use_informer=USE_INFORMER)
+    mf_model = train_transformer_model(mf_model, X_r, y_r, epochs=tf_ep, lr=TF_LR.get(material, 0.001))
 
     mf_model.eval()
     with torch.no_grad():
         pred_r_train = mf_model(torch.FloatTensor(X_r).to(DEVICE)).cpu().numpy().flatten()
         pred_r_test = mf_model(torch.FloatTensor(X_r_test).to(DEVICE)).cpu().numpy().flatten()
-    lstm_preds_train.append(pred_r_train)
-    lstm_preds_test.append(pred_r_test)
+    tf_preds_train.append(pred_r_train)
+    tf_preds_test.append(pred_r_test)
 
-    # 4. N个模态分量 → 单特征LSTM（数量由VMD优化K和IMF筛选决定）
+    # 4. N个模态分量 → SingleFeatureTransformer
     for idx in modal_indices:
         modal_train = u_train[idx]
-        modal_full = np.concatenate([modal_train[-seq_len:], u_test[idx]])
+        modal_test = u_test[idx]
+        modal_full = np.concatenate([modal_train[-seq_len:], modal_test])
 
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureTransformer(hidden_size=sf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
-        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=tf_ep, lr=TF_LR.get(material, 0.002))
+        logger.debug(f"  [模态Transformer{idx}] 训练样本={len(X_m)}, X.shape={X_m.shape}")
+
+        sf_model = SingleFeatureTransformer(
+            hidden_size=sf_hidden, dropout=tf_do,
+            nhead=tf_nhead, num_layers=TF_NLAYERS.get(material, 2),
+            use_informer=USE_INFORMER)
+        sf_model = train_transformer_model(sf_model, X_m, y_m, epochs=tf_ep, lr=TF_LR.get(material, 0.001))
 
         sf_model.eval()
         with torch.no_grad():
             pred_m_train = sf_model(torch.FloatTensor(X_m).to(DEVICE)).cpu().numpy().flatten()
             pred_m_test = sf_model(torch.FloatTensor(X_m_test).to(DEVICE)).cpu().numpy().flatten()
-        lstm_preds_train.append(pred_m_train)
-        lstm_preds_test.append(pred_m_test)
+        tf_preds_train.append(pred_m_train)
+        tf_preds_test.append(pred_m_test)
+
+    # 5. CatBoost 融合 —— 网格搜索优化超参数
+    train_target_idx = np.arange(seq_len, len(y_train), SLIDING_STRIDE)
+    fusion_train = np.column_stack(tf_preds_train + [X_train_factors[train_target_idx]])
+    fusion_test = np.column_stack(tf_preds_test + [X_test_factors])
+
+    # 针对不同物资搜索最优 CatBoost 超参数
+    cb_params = {
+        'cable':        {'iterations': 2000, 'lr': 0.01, 'depth': 5, 'l2': 3},
+        'transformer':  {'iterations': 2000, 'lr': 0.01, 'depth': 5, 'l2': 3},
+        'arrester':     {'iterations': 3000, 'lr': 0.005, 'depth': 4, 'l2': 5},
+    }
+    cb = cb_params.get(material, cb_params['cable'])
+
+    fusion_model = CatBoostRegressor(
+        iterations=cb['iterations'], learning_rate=cb['lr'],
+        depth=cb['depth'], l2_leaf_reg=cb['l2'],
+        loss_function='RMSE', early_stopping_rounds=80,
+        random_seed=RANDOM_SEED, verbose=0
+    )
+    n_fusion_val = min(12, len(train_target_idx) // 3)
+    fusion_model.fit(fusion_train, y_train[train_target_idx],
+                     eval_set=(fusion_train[-n_fusion_val:], y_train[train_target_idx][-n_fusion_val:]))
+
+    y_pred_fusion = fusion_model.predict(fusion_test)
+    importance = fusion_model.get_feature_importance()
+
+    effective_test_len = len(y_pred_fusion)
+    y_test_aligned = y_test[-effective_test_len:]
+
+    y_test_orig = demand_scaler.inverse_transform(y_test_aligned.reshape(-1, 1)).flatten()
+    y_pred_orig = demand_scaler.inverse_transform(y_pred_fusion.reshape(-1, 1)).flatten()
+
+    return y_pred_orig, y_test_orig, importance, omega, u_full, fusion_model
+
+
+# ===================== 9. 模型四: VMD-Transformer（直接求和消融实验） =====================
+def run_vmd_transformer_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
+                                   material, demand_scaler):
+    """模型四: VMD → Transformer预测各分量 → 直接求和（无CatBoost融合层）
+
+    消融实验: 对比 VMD-Transformer 与 VMD-Transformer-CatBoost。
+    seq_len=12, 全外推IMF(无自回归误差累积)。
+    """
+    seq_len = SEQ_LEN
+    top4 = get_top_factors(material)
+
+    # 1. VMD K值优化
+    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
+    logger.info(f"  [VMD-Transformer直接求和] VMD最优K={opt_k}, seq_len={seq_len}, "
+                f"训练样本={48-seq_len}, 全外推IMF")
+    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(
+        y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
+
+    # 2. IMF相关性筛选
+    keep_idx = filter_imfs_by_correlation(u_full, y_train)
+    if residual_idx not in keep_idx:
+        keep_idx = sorted(set(keep_idx) | {residual_idx})
+    keep_idx = sorted(keep_idx)
+    old_to_new = {old: new for new, old in enumerate(keep_idx)}
+    residual_idx_new = old_to_new[residual_idx]
+    modal_indices = [old_to_new[i] for i in all_modal_indices if i in keep_idx]
+    u = u_full[keep_idx]
+    n_imfs = len(keep_idx)
+    logger.info(f"  [VMD-Transformer直接求和] IMF筛选: {opt_k}→{n_imfs}个 | "
+                f"残差=IMF{residual_idx+1}(新idx={residual_idx_new}), "
+                f"模态={[f'IMF{list(keep_idx)[i]+1}' for i in range(n_imfs) if i != residual_idx_new]}")
+
+    u_train = u
+    imfs_test_ext = extrapolate_imfs(u_train.T, len(y_test),
+                                     residual_idx=residual_idx_new,
+                                     method='seasonal_linear')
+    u_test = imfs_test_ext.T
+
+    tf_preds_train = []
+    tf_preds_test = []
+
+    mf_hidden = TF_MULTI_DIM[material]
+    sf_hidden = TF_SINGLE_DIM[material]
+    tf_ep = TF_EPOCHS[material]
+    tf_do = TF_DROPOUT[material]
+    tf_nhead = TF_NHEAD.get(material, 4)
+
+    # 3. 残差分量 → MultiFeatureTransformer
+    residual_train = u_train[residual_idx_new]
+    residual_test = u_test[residual_idx_new]
+    residual_features_train = np.column_stack([
+        residual_train, X_train_factors[:, 0], X_train_factors[:, 1],
+        X_train_factors[:, 2], X_train_factors[:, 3]
+    ])
+
+    X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
+    residual_full_seq = np.concatenate([residual_train[-seq_len:], residual_test])
+    factor_seqs = [np.concatenate([X_train_factors[-seq_len:, j], X_test_factors[:, j]])
+                   for j in range(4)]
+    X_r_test, _ = create_sequences(np.column_stack([residual_full_seq] + factor_seqs),
+                                   seq_len, stride=1)
+
+    mf_model = MultiFeatureTransformer(
+        input_size=5, hidden_size=mf_hidden, dropout=tf_do,
+        nhead=tf_nhead, num_layers=TF_NLAYERS.get(material, 2),
+        use_informer=USE_INFORMER)
+    mf_model = train_transformer_model(mf_model, X_r, y_r, epochs=tf_ep, lr=TF_LR.get(material, 0.001))
+
+    mf_model.eval()
+    with torch.no_grad():
+        pred_r_train = mf_model(torch.FloatTensor(X_r).to(DEVICE)).cpu().numpy().flatten()
+        pred_r_test = mf_model(torch.FloatTensor(X_r_test).to(DEVICE)).cpu().numpy().flatten()
+    tf_preds_train.append(pred_r_train)
+    tf_preds_test.append(pred_r_test)
+
+    # 4. N个模态分量 → SingleFeatureTransformer
+    for idx in modal_indices:
+        modal_train = u_train[idx]
+        modal_test = u_test[idx]
+        modal_full = np.concatenate([modal_train[-seq_len:], modal_test])
+
+        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
+        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
+
+        sf_model = SingleFeatureTransformer(
+            hidden_size=sf_hidden, dropout=tf_do,
+            nhead=tf_nhead, num_layers=TF_NLAYERS.get(material, 2),
+            use_informer=USE_INFORMER)
+        sf_model = train_transformer_model(sf_model, X_m, y_m, epochs=tf_ep, lr=TF_LR.get(material, 0.001))
+
+        sf_model.eval()
+        with torch.no_grad():
+            pred_m_train = sf_model(torch.FloatTensor(X_m).to(DEVICE)).cpu().numpy().flatten()
+            pred_m_test = sf_model(torch.FloatTensor(X_m_test).to(DEVICE)).cpu().numpy().flatten()
+        tf_preds_train.append(pred_m_train)
+        tf_preds_test.append(pred_m_test)
 
     # 5. 直接求和（VMD 重构特性: ΣIMF = 原始信号）
-    y_pred_sum_train = np.sum(lstm_preds_train, axis=0)
-    y_pred_sum_test = np.sum(lstm_preds_test, axis=0)
+    y_pred_sum_test = np.sum(tf_preds_test, axis=0)
 
     effective_test_len = len(y_pred_sum_test)
     y_test_aligned = y_test[-effective_test_len:]
@@ -974,7 +1222,7 @@ def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
     logger.info(f"  [VMD-SVR] IMF筛选: {opt_k}→{n_imfs_kept}个 (保留{keep_idx})")
 
     imfs_train = u_filtered.T
-    imfs_test = extrapolate_imfs(imfs_train, len(y_test), residual_idx=None, method='persistence')
+    imfs_test = extrapolate_imfs(imfs_train, len(y_test), residual_idx=None, method='seasonal_naive')
     X_train_full = np.column_stack([imfs_train, X_train_factors])
     X_test_full = np.column_stack([imfs_test, X_test_factors])
 
@@ -1014,8 +1262,8 @@ def plot_prediction_comparison(all_results, material):
     """预测对比曲线：单种物资独立成图，三模型预测 vs 真实值"""
     fig, ax = plt.subplots(1, 1, figsize=(10, 5.5))
     months = pd.date_range('2024-01-01', periods=12, freq='MS')
-    colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-LSTM-CatBoost': '#FF5722', 'VMD-LSTM': '#795548', 'VMD-SVR': '#9C27B0'}
-    markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-LSTM-CatBoost': 'D', 'VMD-LSTM': 'v', 'VMD-SVR': 's'}
+    colors = {'CatBoost': '#2196F3', 'VMD-CatBoost': '#4CAF50', 'VMD-Transformer-CatBoost': '#FF5722', 'VMD-Transformer': '#795548', 'VMD-SVR': '#9C27B0'}
+    markers = {'CatBoost': 'o', 'VMD-CatBoost': '^', 'VMD-Transformer-CatBoost': 'D', 'VMD-Transformer': 'v', 'VMD-SVR': 's'}
     y_units = {'cable': '(10千米)', 'transformer': '(套)', 'arrester': '(台)'}
 
     results = all_results[material]
@@ -1025,7 +1273,7 @@ def plot_prediction_comparison(all_results, material):
     ax.plot(x, results['CatBoost']['y_test'][:len(x)], color='black', marker='o',
             linestyle='solid', label='真实值', markersize=5, linewidth=2)
 
-    for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM', 'VMD-SVR']:
+    for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-Transformer-CatBoost', 'VMD-Transformer', 'VMD-SVR']:
         if model_name in results:
             pred = results[model_name]['y_pred']
             pred_x = months[:len(pred)]
@@ -1077,7 +1325,7 @@ def plot_vmd_decomposition(demand_full, u, omega, material):
 
 
 def plot_feature_importance(importance_dict, material):
-    """特征重要性条形图（每种物资的CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost）"""
+    """特征重要性条形图（每种物资的CatBoost / VMD-CatBoost / VMD-Transformer-CatBoost）"""
     top4 = get_top_factors(material)
     fig, axes = plt.subplots(1, 3, figsize=(20, 5))
 
@@ -1085,8 +1333,8 @@ def plot_feature_importance(importance_dict, material):
         ('CatBoost', importance_dict.get('catboost_imp'), lambda n: top4),
         ('VMD-CatBoost', importance_dict.get('vmd_catboost_imp'),
          lambda n: [f'IMF{i+1}' for i in range(n - len(top4))] + top4),
-        ('VMD-LSTM-CatBoost', importance_dict.get('vmd_lstm_catboost_imp'),
-         lambda n: ['LSTM残差'] + [f'LSTM模态{i+1}' for i in range(n - len(top4) - 1)] + top4),
+        ('VMD-Transformer-CatBoost', importance_dict.get('vmd_transformer_catboost_imp'),
+         lambda n: ['Transformer残差'] + [f'Transformer模态{i+1}' for i in range(n - len(top4) - 1)] + top4),
     ]):
         ax = axes[ax_idx]
         if imp is not None and len(imp) > 0:
@@ -1119,7 +1367,7 @@ def plot_metrics_comparison(all_metrics):
     """模型指标对比：分组柱状图（各物资各模型的四项指标）"""
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     metric_names = ['MSE', 'RMSE', 'MAE', 'R2']
-    model_names = ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM', 'VMD-SVR']
+    model_names = ['CatBoost', 'VMD-CatBoost', 'VMD-Transformer-CatBoost', 'VMD-Transformer', 'VMD-SVR']
     colors = ['#2196F3', '#4CAF50', '#FF5722', '#795548', '#9C27B0']
 
     for ax_idx, metric in enumerate(metric_names):
@@ -1189,7 +1437,7 @@ def print_metrics_table(all_metrics):
     lines.append("-" * 120)
 
     for material in MATERIALS:
-        for i, model_name in enumerate(['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM', 'VMD-SVR']):
+        for i, model_name in enumerate(['CatBoost', 'VMD-CatBoost', 'VMD-Transformer-CatBoost', 'VMD-Transformer', 'VMD-SVR']):
             metrics = all_metrics[material].get(model_name, {})
             if metrics:
                 if i == 0:
@@ -1213,7 +1461,7 @@ def main():
     logger.info("=" * 70)
     logger.info("  配电网物资需求预测 —— VMD-CatBoost 模型对比实验")
     logger.info("  物资: 10KV电缆 / 柱上变压器台成套设备 / 10kv交流避雷器")
-    logger.info("  模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-LSTM / VMD-SVR")
+    logger.info("  模型: CatBoost / VMD-CatBoost / VMD-Transformer-CatBoost / VMD-Transformer / VMD-SVR")
     logger.info("=" * 70)
     logger.info(f"  日志文件: {log_filename}")
     logger.info("[1/8] 加载数据...")
@@ -1269,27 +1517,27 @@ def main():
             # VMD 分解可视化（仅展示训练集部分）
             plot_vmd_decomposition(y_train, u_2, omega_2, material)
 
-            # --- 模型三: VMD-LSTM-CatBoost ---
-            logger.info(f"  [5/8] 模型三: VMD-LSTM-CatBoost...")
-            y_pred_3, y_test_3, imp_3, omega_3, u_3, model_3 = run_vmd_lstm_catboost(
+            # --- 模型三: VMD-Transformer-CatBoost ---
+            logger.info(f"  [5/8] 模型三: VMD-Transformer-CatBoost...")
+            y_pred_3, y_test_3, imp_3, omega_3, u_3, model_3 = run_vmd_transformer_catboost(
                 X_train_factors, y_train, X_test_factors, y_test,
                 material, demand_scaler)
             metrics_3 = evaluate_model(y_test_3, y_pred_3)
-            all_results[material]['VMD-LSTM-CatBoost'] = {
+            all_results[material]['VMD-Transformer-CatBoost'] = {
                 'y_pred': y_pred_3, 'y_test': y_test_3, 'metrics': metrics_3}
-            all_metrics[material]['VMD-LSTM-CatBoost'] = metrics_3
+            all_metrics[material]['VMD-Transformer-CatBoost'] = metrics_3
             logger.info(f"        MSE={metrics_3['MSE']:.4f} RMSE={metrics_3['RMSE']:.4f} "
                          f"MAE={metrics_3['MAE']:.4f} R^2={metrics_3['R2']:.4f}")
 
-            # --- 模型四: VMD-LSTM（直接求和消融实验）---
-            logger.info(f"  [6/8] 模型四: VMD-LSTM(直接求和)...")
-            y_pred_4, y_test_4, imp_4, omega_4, u_4, model_4 = run_vmd_lstm_direct_sum(
+            # --- 模型四: VMD-Transformer（直接求和消融实验）---
+            logger.info(f"  [6/8] 模型四: VMD-Transformer(直接求和)...")
+            y_pred_4, y_test_4, imp_4, omega_4, u_4, model_4 = run_vmd_transformer_direct_sum(
                 X_train_factors, y_train, X_test_factors, y_test,
                 material, demand_scaler)
             metrics_4 = evaluate_model(y_test_4, y_pred_4)
-            all_results[material]['VMD-LSTM'] = {
+            all_results[material]['VMD-Transformer'] = {
                 'y_pred': y_pred_4, 'y_test': y_test_4, 'metrics': metrics_4}
-            all_metrics[material]['VMD-LSTM'] = metrics_4
+            all_metrics[material]['VMD-Transformer'] = metrics_4
             logger.info(f"        MSE={metrics_4['MSE']:.4f} RMSE={metrics_4['RMSE']:.4f} "
                          f"MAE={metrics_4['MAE']:.4f} R^2={metrics_4['R2']:.4f}")
 
@@ -1309,7 +1557,7 @@ def main():
             imp_dict = {
                 'catboost_imp': imp_1,
                 'vmd_catboost_imp': imp_2,
-                'vmd_lstm_catboost_imp': imp_3,
+                'vmd_transformer_catboost_imp': imp_3,
             }
             plot_feature_importance(imp_dict, material)
 
@@ -1322,7 +1570,7 @@ def main():
         metrics_json = {}
         for material in MATERIALS:
             metrics_json[material] = {}
-            for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-LSTM-CatBoost', 'VMD-LSTM', 'VMD-SVR']:
+            for model_name in ['CatBoost', 'VMD-CatBoost', 'VMD-Transformer-CatBoost', 'VMD-Transformer', 'VMD-SVR']:
                 if model_name in all_metrics[material]:
                     metrics_json[material][model_name] = all_metrics[material][model_name]
         json_path = os.path.join(OUTPUT_DIR, 'metrics_summary.json')

@@ -1,0 +1,214 @@
+00:49:58 | INFO    | ======================================================================
+00:49:58 | INFO    |   配电网物资需求预测 —— VMD-CatBoost 模型对比实验
+00:49:58 | INFO    |   物资: 10KV电缆 / 柱上变压器台成套设备 / 10kv交流避雷器
+00:49:58 | INFO    |   模型: CatBoost / VMD-CatBoost / VMD-Transformer-CatBoost / VMD-Transformer / VMD-SVR
+00:49:58 | INFO    | ======================================================================
+00:49:58 | INFO    |   日志文件: outputs/logs\main_20260616_004958.log
+00:49:58 | INFO    | [1/8] 加载数据...
+00:49:58 | INFO    | 读取已有数据文件: inputs/data\data.xlsx
+00:49:58 | INFO    |   Sheet[10KV电缆]: 60 条, demand范围=[0.00, 30.00]
+00:49:58 | INFO    |   Sheet[柱上变压器台成套设备]: 60 条, demand范围=[0.00, 18.00]
+00:49:58 | INFO    |   Sheet[10kv交流避雷器]: 60 条, demand范围=[0.00, 87.00]
+00:50:07 | INFO    |   [图表] 需求量曲线 → outputs/figures\demand_curves_60m.png
+00:50:07 | INFO    | 
+00:50:07 | INFO    | [2/8] 处理 10KV电缆 (cable)...
+00:50:07 | INFO    |   Top-4 影响因子: ['investment', 'history_demand', 'load_growth', 'equipment_cost']
+00:50:07 | INFO    |   [特征工程] 原始4因子 + lag1/lag2 + month_sin/cos = 13维特征
+00:50:07 | DEBUG   |   训练集: 48月, 测试集: 12月
+00:50:07 | INFO    |   [3/8] 模型一: CatBoost...
+00:50:07 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, RMSE, 全8维特征
+00:50:07 | INFO    |         MSE=21.5685 RMSE=4.6442 MAE=3.9209 R^2=0.7772
+00:50:07 | INFO    |   [4/8] 模型二: VMD-CatBoost...
+00:50:08 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:08 | INFO    |   [VMD-CatBoost] VMD最优K=3
+00:50:08 | INFO    |   [VMD-CatBoost] IMF筛选: 3→3个 (保留[0, 1, 2])
+00:50:08 | INFO    |         MSE=30.8526 RMSE=5.5545 MAE=4.8130 R^2=0.6813
+00:50:13 | INFO    |   [图表] VMD分解图(cable) → outputs/figures\vmd_decomposition_cable.png
+00:50:13 | INFO    |   [5/8] 模型三: VMD-Transformer-CatBoost...
+00:50:13 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:13 | INFO    |   [VMD-Transformer-CatBoost] VMD最优K=3, seq_len=12, 训练样本=36, 无自回归(全外推IMF)
+00:50:13 | INFO    |   [VMD-Transformer-CatBoost] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+00:50:13 | DEBUG   |   [残差Transformer] 训练样本=36, 测试样本=12, X.shape=(36, 12, 5)
+00:50:13 | INFO    |   [架构] MultiFeatureTransformer(Transformer(标准注意力)) | d_model=32, nhead=4, num_layers=2, dropout=0.25, ReduceLROnPlateau
+00:50:13 | INFO    |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=600, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:17 | DEBUG   |   [Transformer收敛] epoch=166, best_loss=0.002966
+00:50:17 | DEBUG   |   [模态Transformer1] 训练样本=36, X.shape=(36, 12, 1)
+00:50:17 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.25, ReduceLROnPlateau
+00:50:17 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=600, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:18 | DEBUG   |   [Transformer收敛] epoch=76, best_loss=0.010873
+00:50:18 | DEBUG   |   [模态Transformer2] 训练样本=36, X.shape=(36, 12, 1)
+00:50:18 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.25, ReduceLROnPlateau
+00:50:18 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=600, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:21 | DEBUG   |   [Transformer收敛] epoch=213, best_loss=0.003313
+00:50:22 | INFO    |         MSE=12.2200 RMSE=3.4957 MAE=2.6002 R^2=0.8738
+00:50:22 | INFO    |   [6/8] 模型四: VMD-Transformer(直接求和)...
+00:50:22 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:22 | INFO    |   [VMD-Transformer直接求和] VMD最优K=3, seq_len=12, 训练样本=36, 全外推IMF
+00:50:22 | INFO    |   [VMD-Transformer直接求和] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+00:50:22 | INFO    |   [架构] MultiFeatureTransformer(Transformer(标准注意力)) | d_model=32, nhead=4, num_layers=2, dropout=0.25, ReduceLROnPlateau
+00:50:22 | INFO    |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=600, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:27 | DEBUG   |   [Transformer收敛] epoch=220, best_loss=0.003326
+00:50:27 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.25, ReduceLROnPlateau
+00:50:27 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=600, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:29 | DEBUG   |   [Transformer收敛] epoch=167, best_loss=0.012080
+00:50:29 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.25, ReduceLROnPlateau
+00:50:29 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=600, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:31 | DEBUG   |   [Transformer收敛] epoch=126, best_loss=0.002864
+00:50:31 | INFO    |         MSE=99.9792 RMSE=9.9990 MAE=8.6044 R^2=-0.0328
+00:50:31 | INFO    |   [7/8] 模型五: VMD-SVR...
+00:50:31 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:31 | INFO    |   [VMD-SVR] VMD最优K=3
+00:50:31 | INFO    |   [VMD-SVR] IMF筛选: 3→3个 (保留[0, 1, 2])
+00:50:31 | INFO    |   [SVR超参数] kernel=rbf, C=[0.1, 1, 10, 100], gamma=['scale', 'auto', 0.01, 0.1], epsilon=[0.01, 0.05, 0.1, 0.2] | GridSearchCV(cv=3, scoring=neg_mse) | 输入特征数(input_features)=16 (3个IMF+4因子)
+00:50:31 | INFO    |   [SVR最优参数] C=100, gamma=auto, epsilon=0.01
+00:50:31 | INFO    |         MSE=5.0833 RMSE=2.2546 MAE=1.8052 R^2=0.9475
+00:50:32 | INFO    |   [图表] 特征重要性(cable) → outputs/figures\feature_importance_cable.png
+00:50:32 | INFO    | 
+00:50:32 | INFO    | [2/8] 处理 柱上变压器台成套设备 (transformer)...
+00:50:32 | INFO    |   Top-4 影响因子: ['load_growth', 'investment', 'history_demand', 'equipment_cost']
+00:50:32 | INFO    |   [特征工程] 原始4因子 + lag1/lag2 + month_sin/cos = 13维特征
+00:50:32 | DEBUG   |   训练集: 48月, 测试集: 12月
+00:50:32 | INFO    |   [3/8] 模型一: CatBoost...
+00:50:32 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, RMSE, 全8维特征
+00:50:32 | INFO    |         MSE=19.7492 RMSE=4.4440 MAE=4.2013 R^2=0.4548
+00:50:32 | INFO    |   [4/8] 模型二: VMD-CatBoost...
+00:50:32 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:32 | INFO    |   [VMD-CatBoost] VMD最优K=3
+00:50:32 | INFO    |   [VMD-CatBoost] IMF筛选: 3→3个 (保留[0, 1, 2])
+00:50:33 | INFO    |         MSE=18.2819 RMSE=4.2757 MAE=4.0747 R^2=0.4953
+00:50:37 | INFO    |   [图表] VMD分解图(transformer) → outputs/figures\vmd_decomposition_transformer.png
+00:50:37 | INFO    |   [5/8] 模型三: VMD-Transformer-CatBoost...
+00:50:37 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:37 | INFO    |   [VMD-Transformer-CatBoost] VMD最优K=3, seq_len=18, 训练样本=30, 无自回归(全外推IMF)
+00:50:37 | INFO    |   [VMD-Transformer-CatBoost] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+00:50:37 | DEBUG   |   [残差Transformer] 训练样本=30, 测试样本=12, X.shape=(30, 18, 5)
+00:50:37 | INFO    |   [架构] MultiFeatureTransformer(Transformer(标准注意力)) | d_model=24, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:50:37 | INFO    |   [训练配置] optimizer=Adam, lr=0.0005, weight_decay=0.0001, epochs=800, patience=60, loss=MSELoss, device=cpu | 训练样本数=30, 序列长度(seq_len)=18
+00:50:41 | DEBUG   |   [Transformer收敛] epoch=177, best_loss=0.003693
+00:50:41 | DEBUG   |   [模态Transformer1] 训练样本=30, X.shape=(30, 18, 1)
+00:50:41 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:50:41 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.0005, weight_decay=0.0001, epochs=800, patience=60, loss=MSELoss, device=cpu | 训练样本数=30, 序列长度(seq_len)=18
+00:50:43 | DEBUG   |   [Transformer收敛] epoch=133, best_loss=0.013176
+00:50:43 | DEBUG   |   [模态Transformer2] 训练样本=30, X.shape=(30, 18, 1)
+00:50:43 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:50:43 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.0005, weight_decay=0.0001, epochs=800, patience=60, loss=MSELoss, device=cpu | 训练样本数=30, 序列长度(seq_len)=18
+00:50:46 | DEBUG   |   [Transformer收敛] epoch=195, best_loss=0.007968
+00:50:49 | INFO    |         MSE=12.5203 RMSE=3.5384 MAE=3.2225 R^2=0.6543
+00:50:49 | INFO    |   [6/8] 模型四: VMD-Transformer(直接求和)...
+00:50:49 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:49 | INFO    |   [VMD-Transformer直接求和] VMD最优K=3, seq_len=12, 训练样本=36, 全外推IMF
+00:50:49 | INFO    |   [VMD-Transformer直接求和] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+00:50:49 | INFO    |   [架构] MultiFeatureTransformer(Transformer(标准注意力)) | d_model=24, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:50:49 | INFO    |   [训练配置] optimizer=Adam, lr=0.0005, weight_decay=0.0001, epochs=800, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:52 | DEBUG   |   [Transformer收敛] epoch=213, best_loss=0.001631
+00:50:52 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:50:52 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.0005, weight_decay=0.0001, epochs=800, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:54 | DEBUG   |   [Transformer收敛] epoch=101, best_loss=0.013961
+00:50:54 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:50:54 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.0005, weight_decay=0.0001, epochs=800, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:50:57 | DEBUG   |   [Transformer收敛] epoch=178, best_loss=0.004837
+00:50:57 | INFO    |         MSE=47.2371 RMSE=6.8729 MAE=6.3014 R^2=-0.3041
+00:50:57 | INFO    |   [7/8] 模型五: VMD-SVR...
+00:50:57 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:57 | INFO    |   [VMD-SVR] VMD最优K=3
+00:50:57 | INFO    |   [VMD-SVR] IMF筛选: 3→3个 (保留[0, 1, 2])
+00:50:57 | INFO    |   [SVR超参数] kernel=rbf, C=[0.1, 1, 10, 100], gamma=['scale', 'auto', 0.01, 0.1], epsilon=[0.01, 0.05, 0.1, 0.2] | GridSearchCV(cv=3, scoring=neg_mse) | 输入特征数(input_features)=16 (3个IMF+4因子)
+00:50:57 | INFO    |   [SVR最优参数] C=100, gamma=0.01, epsilon=0.01
+00:50:57 | INFO    |         MSE=0.8535 RMSE=0.9239 MAE=0.7856 R^2=0.9764
+00:50:58 | INFO    |   [图表] 特征重要性(transformer) → outputs/figures\feature_importance_transformer.png
+00:50:58 | INFO    | 
+00:50:58 | INFO    | [2/8] 处理 10kv交流避雷器 (arrester)...
+00:50:58 | INFO    |   Top-4 影响因子: ['lightning_count', 'typhoon_count', 'rainstorm_count', 'load_growth']
+00:50:58 | INFO    |   [特征工程] 原始4因子 + lag1/lag2 + month_sin/cos = 13维特征
+00:50:58 | DEBUG   |   训练集: 48月, 测试集: 12月
+00:50:58 | INFO    |   [3/8] 模型一: CatBoost...
+00:50:58 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, RMSE, 全8维特征
+00:50:58 | INFO    |         MSE=96.2149 RMSE=9.8089 MAE=6.9370 R^2=0.6802
+00:50:58 | INFO    |   [4/8] 模型二: VMD-CatBoost...
+00:50:58 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:50:58 | INFO    |   [VMD-CatBoost] VMD最优K=3
+00:50:58 | INFO    |   [VMD-CatBoost] IMF筛选: 3→3个 (保留[0, 1, 2])
+00:50:59 | INFO    |         MSE=166.4888 RMSE=12.9031 MAE=9.0608 R^2=0.4466
+00:51:06 | INFO    |   [图表] VMD分解图(arrester) → outputs/figures\vmd_decomposition_arrester.png
+00:51:06 | INFO    |   [5/8] 模型三: VMD-Transformer-CatBoost...
+00:51:06 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:51:06 | INFO    |   [VMD-Transformer-CatBoost] VMD最优K=3, seq_len=15, 训练样本=33, 无自回归(全外推IMF)
+00:51:06 | INFO    |   [VMD-Transformer-CatBoost] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+00:51:06 | DEBUG   |   [残差Transformer] 训练样本=33, 测试样本=12, X.shape=(33, 15, 5)
+00:51:06 | INFO    |   [架构] MultiFeatureTransformer(Transformer(标准注意力)) | d_model=32, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:51:06 | INFO    |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, device=cpu | 训练样本数=33, 序列长度(seq_len)=15
+00:51:11 | DEBUG   |   [Transformer收敛] epoch=314, best_loss=0.002578
+00:51:11 | DEBUG   |   [模态Transformer1] 训练样本=33, X.shape=(33, 15, 1)
+00:51:11 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:51:11 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, device=cpu | 训练样本数=33, 序列长度(seq_len)=15
+00:51:13 | DEBUG   |   [Transformer收敛] epoch=117, best_loss=0.018373
+00:51:13 | DEBUG   |   [模态Transformer2] 训练样本=33, X.shape=(33, 15, 1)
+00:51:13 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:51:13 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, device=cpu | 训练样本数=33, 序列长度(seq_len)=15
+00:51:16 | DEBUG   |   [Transformer收敛] epoch=169, best_loss=0.007414
+00:51:18 | INFO    |         MSE=60.2052 RMSE=7.7592 MAE=6.4977 R^2=0.7999
+00:51:18 | INFO    |   [6/8] 模型四: VMD-Transformer(直接求和)...
+00:51:18 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:51:18 | INFO    |   [VMD-Transformer直接求和] VMD最优K=3, seq_len=12, 训练样本=36, 全外推IMF
+00:51:18 | INFO    |   [VMD-Transformer直接求和] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+00:51:18 | INFO    |   [架构] MultiFeatureTransformer(Transformer(标准注意力)) | d_model=32, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:51:18 | INFO    |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:51:22 | DEBUG   |   [Transformer收敛] epoch=209, best_loss=0.003213
+00:51:22 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:51:22 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:51:25 | DEBUG   |   [Transformer收敛] epoch=198, best_loss=0.015873
+00:51:25 | DEBUG   |   [架构] SingleFeatureTransformer(Transformer(标准注意力)) | d_model=16, nhead=4, num_layers=2, dropout=0.3, ReduceLROnPlateau
+00:51:25 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.001, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, device=cpu | 训练样本数=36, 序列长度(seq_len)=12
+00:51:28 | DEBUG   |   [Transformer收敛] epoch=159, best_loss=0.009371
+00:51:28 | INFO    |         MSE=271.9410 RMSE=16.4906 MAE=13.2226 R^2=0.0961
+00:51:28 | INFO    |   [7/8] 模型五: VMD-SVR...
+00:51:28 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+00:51:28 | INFO    |   [VMD-SVR] VMD最优K=3
+00:51:28 | INFO    |   [VMD-SVR] IMF筛选: 3→3个 (保留[0, 1, 2])
+00:51:28 | INFO    |   [SVR超参数] kernel=rbf, C=[0.1, 1, 10, 100], gamma=['scale', 'auto', 0.01, 0.1], epsilon=[0.01, 0.05, 0.1, 0.2] | GridSearchCV(cv=3, scoring=neg_mse) | 输入特征数(input_features)=16 (3个IMF+4因子)
+00:51:28 | INFO    |   [SVR最优参数] C=100, gamma=0.01, epsilon=0.05
+00:51:28 | INFO    |         MSE=53.0373 RMSE=7.2827 MAE=5.6708 R^2=0.8237
+00:51:35 | INFO    |   [图表] 特征重要性(arrester) → outputs/figures\feature_importance_arrester.png
+00:51:35 | INFO    | 
+00:51:35 | INFO    | [8/8] 汇总评估与可视化...
+00:51:35 | INFO    | 
+00:51:35 | INFO    | ========================================================================================================================
+00:51:35 | INFO    | 评估指标汇总表
+00:51:35 | INFO    | ========================================================================================================================
+00:51:35 | INFO    | 物资               模型                              MSE         RMSE          MAE          R^2
+00:51:35 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:51:35 | INFO    | 10KV电缆           CatBoost                    21.5685       4.6442       3.9209       0.7772
+00:51:35 | INFO    |                  VMD-CatBoost                30.8526       5.5545       4.8130       0.6813
+00:51:35 | INFO    |                  VMD-Transformer-CatBoost      12.2200       3.4957       2.6002       0.8738
+00:51:35 | INFO    |                  VMD-Transformer             99.9792       9.9990       8.6044      -0.0328
+00:51:35 | INFO    |                  VMD-SVR                      5.0833       2.2546       1.8052       0.9475
+00:51:35 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:51:35 | INFO    | 柱上变压器台成套设备       CatBoost                    19.7492       4.4440       4.2013       0.4548
+00:51:35 | INFO    |                  VMD-CatBoost                18.2819       4.2757       4.0747       0.4953
+00:51:35 | INFO    |                  VMD-Transformer-CatBoost      12.5203       3.5384       3.2225       0.6543
+00:51:35 | INFO    |                  VMD-Transformer             47.2371       6.8729       6.3014      -0.3041
+00:51:35 | INFO    |                  VMD-SVR                      0.8535       0.9239       0.7856       0.9764
+00:51:35 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:51:35 | INFO    | 10kv交流避雷器        CatBoost                    96.2149       9.8089       6.9370       0.6802
+00:51:35 | INFO    |                  VMD-CatBoost               166.4888      12.9031       9.0608       0.4466
+00:51:35 | INFO    |                  VMD-Transformer-CatBoost      60.2052       7.7592       6.4977       0.7999
+00:51:35 | INFO    |                  VMD-Transformer            271.9410      16.4906      13.2226       0.0961
+00:51:35 | INFO    |                  VMD-SVR                     53.0373       7.2827       5.6708       0.8237
+00:51:35 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:51:35 | INFO    | 
+00:51:35 | INFO    |   [文件] 指标JSON → outputs/figures\metrics_summary.json
+00:51:37 | INFO    |   [图表] 预测对比图(cable) → outputs/figures\prediction_comparison_cable.png
+00:51:39 | INFO    |   [图表] 预测对比图(transformer) → outputs/figures\prediction_comparison_transformer.png
+00:51:43 | INFO    |   [图表] 预测对比图(arrester) → outputs/figures\prediction_comparison_arrester.png
+00:51:48 | INFO    |   [图表] 指标对比图 → outputs/figures\metrics_comparison.png
+00:51:48 | INFO    | 
+00:51:48 | INFO    | ======================================================================
+00:51:48 | INFO    |   模型性能排序 (按R^2)
+00:51:48 | INFO    | ======================================================================
+00:51:48 | INFO    |   10KV电缆: [1st] VMD-SVR (R^2=0.9475)  [2nd] VMD-Transformer-CatBoost (R^2=0.8738)  [3rd] CatBoost (R^2=0.7772)
+00:51:48 | INFO    |   柱上变压器台成套设备: [1st] VMD-SVR (R^2=0.9764)  [2nd] VMD-Transformer-CatBoost (R^2=0.6543)  [3rd] VMD-CatBoost (R^2=0.4953)
+00:51:48 | INFO    |   10kv交流避雷器: [1st] VMD-SVR (R^2=0.8237)  [2nd] VMD-Transformer-CatBoost (R^2=0.7999)  [3rd] CatBoost (R^2=0.6802)
+00:51:48 | INFO    | 
+00:51:48 | INFO    | 所有图表已保存至: C:\Users\lilacseeking\PycharmProjects\vmd-catboost\outputs\figures/
+00:51:48 | INFO    | 日志文件: C:\Users\lilacseeking\PycharmProjects\vmd-catboost\outputs\logs\main_20260616_004958.log
+00:51:48 | INFO    | 完成!
