@@ -112,9 +112,12 @@ FACTOR_LABELS = {'load_growth': '负荷增长量(分)', 'investment': '工程投
 VMD_K = 5
 VMD_ALPHA = 2000
 VMD_ALPHA_MAP = {'cable': 2500, 'transformer': 2500, 'arrester': 2000}
-LSTM_MULTI_HIDDEN = {'cable': 8, 'transformer': 8, 'arrester': 6}
-LSTM_SINGLE_HIDDEN = {'cable': 4, 'transformer': 4, 'arrester': 3}
-LSTM_EPOCHS = {'cable': 1000, 'transformer': 1000, 'arrester': 1000}
+TF_MULTI_DIM = {'cable': 32, 'transformer': 32, 'arrester': 24}
+TF_NLAYERS = {'cable': 2, 'transformer': 2, 'arrester': 2}
+TF_SINGLE_DIM = {'cable': 16, 'transformer': 16, 'arrester': 12}
+TF_EPOCHS = {'cable': 500, 'transformer': 500, 'arrester': 500}
+TF_DROPOUT = {'cable': 0.2, 'transformer': 0.2, 'arrester': 0.25}
+TF_SEQ_LEN = {'cable': 6, 'transformer': 6, 'arrester': 6}
 VMD_AUTO_K = True  # False=固定K=3, True=自动优化
 SEQ_LEN = 6
 SLIDING_STRIDE = 1  # 滑动窗口步长，stride=1最大化训练样本(42个)
@@ -519,40 +522,69 @@ def filter_imfs_by_correlation(imfs, signal, corr_threshold=0.1):
     return keep_idx
 
 
-# ===================== 5. LSTM 模型定义 =====================
-class MultiFeatureLSTM(nn.Module):
-    """多特征LSTM: 残差分量+4因子 → 预测值（2层LSTM+dropout+双层FC）"""
-    def __init__(self, input_size=5, hidden_size=6, dropout=0.25):
+# ===================== 5. Transformer 模型定义 =====================
+class PositionalEncoding(nn.Module):
+    """正弦位置编码: 给Transformer注入时间顺序信息"""
+    def __init__(self, d_model, max_len=100):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, batch_first=True, dropout=dropout)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Sequential(nn.Linear(hidden_size, hidden_size//2), nn.ReLU(), nn.Linear(hidden_size//2, 1))
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
-        out, _ = self.lstm(x)
-        out = self.dropout(out[:, -1, :])
-        return self.fc(out)
+        return x + self.pe[:, :x.size(1), :]
 
 
-class SingleFeatureLSTM(nn.Module):
-    """单特征LSTM: 单个模态分量 → 预测值（2层LSTM+dropout+双层FC）"""
-    def __init__(self, hidden_size=4, dropout=0.25):
+class MultiFeatureTransformer(nn.Module):
+    """多特征Transformer: 滑动窗口输入 → 单步预测（全局注意力）"""
+    def __init__(self, input_size=5, hidden_size=32, dropout=0.2, nhead=4, num_layers=2):
         super().__init__()
-        self.lstm = nn.LSTM(1, hidden_size, num_layers=2, batch_first=True, dropout=dropout)
+        d_model = hidden_size
+        self.input_proj = nn.Linear(input_size, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, max_len=100)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead,
+                                                    dropout=dropout, batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Sequential(nn.Linear(hidden_size, hidden_size//2), nn.ReLU(), nn.Linear(hidden_size//2, 1))
+        self.fc = nn.Sequential(nn.Linear(d_model, d_model//2), nn.ReLU(), nn.Linear(d_model//2, 1))
 
     def forward(self, x):
-        out, _ = self.lstm(x)
-        out = self.dropout(out[:, -1, :])
-        return self.fc(out)
+        x = self.input_proj(x)
+        x = self.pos_encoder(x)
+        x = self.encoder(x)
+        x = self.dropout(x[:, -1, :])
+        return self.fc(x)
+
+
+class SingleFeatureTransformer(nn.Module):
+    """单特征Transformer: 滑动窗口 → 单步预测"""
+    def __init__(self, hidden_size=16, dropout=0.2, nhead=4, num_layers=2):
+        super().__init__()
+        d_model = hidden_size
+        self.input_proj = nn.Linear(1, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, max_len=100)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead,
+                                                    dropout=dropout, batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Sequential(nn.Linear(d_model, max(d_model//2, 4)), nn.ReLU(),
+                                nn.Linear(max(d_model//2, 4), 1))
+
+    def forward(self, x):
+        x = self.input_proj(x)
+        x = self.pos_encoder(x)
+        x = self.encoder(x)
+        x = self.dropout(x[:, -1, :])
+        return self.fc(x)
 
 
 def create_sequences(data, seq_len=SEQ_LEN, stride=1):
     """构建时间窗口序列 X:(n, seq_len, features), y:(n,)
 
     stride < seq_len 时创建重叠窗口，扩充LSTM训练样本量。
-    例如 seq_len=6, stride=2 → 相邻窗口重叠4个时间步，样本数 ≈ (N-seq_len)/stride
     """
     if data.ndim == 1:
         data = data.reshape(-1, 1)
@@ -563,22 +595,31 @@ def create_sequences(data, seq_len=SEQ_LEN, stride=1):
     return np.array(X), np.array(y_list)
 
 
+def create_full_sequence(data, train_len=36, pred_len=12):
+    """整序列: 用前train_len步预测后pred_len步 (Transformer专用)"""
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+    X = data[:train_len].reshape(1, train_len, -1)  # (1, 36, features)
+    y = data[train_len:train_len+pred_len, 0]        # (12,)
+    return X, y
+
+
 def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=0.002, weight_decay=1e-4):
     """训练LSTM模型（2层LSTM+dropout+ReduceLROnPlateau），返回训练好的模型"""
     model = model.to(DEVICE)
     X_t = torch.FloatTensor(X).to(DEVICE)
     y_t = torch.FloatTensor(y).to(DEVICE)
 
-    if isinstance(model, MultiFeatureLSTM):
-        arch = (f"MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | "
+    if isinstance(model, MultiFeatureTransformer):
+        arch = (f"MultiFeatureTransformer | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | "
                 f"CNN/池化层: 无(本模型不使用卷积/池化)")
         train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
                      f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
                      f"训练样本数(train_samples)={len(X)}, 序列长度(seq_len)={X.shape[1]}")
         logger.info(f"  [LSTM架构] {arch}")
         logger.info(f"  [训练配置] {train_cfg}")
-    elif isinstance(model, SingleFeatureLSTM):
-        arch = (f"SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | "
+    elif isinstance(model, SingleFeatureTransformer):
+        arch = (f"SingleFeatureTransformer | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | "
                 f"CNN/池化层: 无(本模型不使用卷积/池化)")
         train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
                      f"loss=MSELoss, batch_size=full_batch(全批次), device={DEVICE} | "
@@ -699,8 +740,8 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
 # ===================== 8. 模型三: VMD-LSTM-CatBoost =====================
 def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
                           material, demand_scaler):
-    """模型三: VMD(仅训练集) → 残差多特征LSTM + N模态单特征LSTM → CatBoost融合"""
-    seq_len = SEQ_LEN
+    """模型三: VMD(仅训练集) → 残差Transformer + N模态Transformer → CatBoost融合"""
+    seq_len = TF_SEQ_LEN.get(material, SEQ_LEN)
     top4 = get_top_factors(material)
 
     # 1. VMD K值优化 + 仅对训练集分解，避免 Look-Ahead Bias
@@ -745,7 +786,6 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     ])
 
     X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
-    # 测试序列需要包含训练集尾部以构建窗口
     residual_full_seq = np.concatenate([residual_train[-seq_len:], residual_test])
     factor_full_seqs = []
     for j in range(4):
@@ -753,11 +793,12 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_hidden = LSTM_MULTI_HIDDEN[material]
-    sf_hidden = LSTM_SINGLE_HIDDEN[material]
-    lstm_ep = LSTM_EPOCHS[material]
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=mf_hidden, dropout=0.25)
-    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=lstm_ep)
+    mf_hidden = TF_MULTI_DIM[material]
+    sf_hidden = TF_SINGLE_DIM[material]
+    tf_ep = TF_EPOCHS[material]
+    tf_do = TF_DROPOUT[material]
+    mf_model = MultiFeatureTransformer(input_size=5, hidden_size=mf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
+    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=tf_ep)
 
     mf_model.eval()
     with torch.no_grad():
@@ -775,8 +816,8 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureLSTM(hidden_size=sf_hidden, dropout=0.25)
-        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=lstm_ep)
+        sf_model = SingleFeatureTransformer(hidden_size=sf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
+        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=tf_ep)
 
         sf_model.eval()
         with torch.no_grad():
@@ -827,8 +868,8 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
 
     # 1. VMD K值优化 + 仅对训练集分解
     opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
-    logger.info(f"  [VMD-LSTM直接求和] VMD最优K={opt_k} → 1×MultiFeatureLSTM(hidden=8,do=0.25) + "
-                f"N×SingleFeatureLSTM(hidden=6,do=0.25) → 直接求和 | "
+    logger.info(f"  [VMD-LSTM直接求和] VMD最优K={opt_k} → 1×MultiFeatureTransformer(hidden=8,do=0.25) + "
+                f"N×SingleFeatureTransformer(hidden=6,do=0.25) → 直接求和 | "
                 f"序列长度(seq_len)={seq_len}, 输入特征数(input_features)=4(top-4因子)")
     u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
 
@@ -870,11 +911,12 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_hidden = LSTM_MULTI_HIDDEN[material]
-    sf_hidden = LSTM_SINGLE_HIDDEN[material]
-    lstm_ep = LSTM_EPOCHS[material]
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=mf_hidden, dropout=0.25)
-    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=lstm_ep)
+    mf_hidden = TF_MULTI_DIM[material]
+    sf_hidden = TF_SINGLE_DIM[material]
+    tf_ep = TF_EPOCHS[material]
+    tf_do = TF_DROPOUT[material]
+    mf_model = MultiFeatureTransformer(input_size=5, hidden_size=mf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
+    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=tf_ep)
 
     mf_model.eval()
     with torch.no_grad():
@@ -891,8 +933,8 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureLSTM(hidden_size=sf_hidden, dropout=0.25)
-        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=lstm_ep)
+        sf_model = SingleFeatureTransformer(hidden_size=sf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
+        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=tf_ep)
 
         sf_model.eval()
         with torch.no_grad():
