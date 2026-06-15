@@ -111,6 +111,7 @@ FACTOR_LABELS = {'load_growth': '负荷增长量(分)', 'investment': '工程投
                  'rainstorm_count': '暴雨(分)'}
 VMD_K = 5
 VMD_ALPHA = 2000
+VMD_ALPHA_MAP = {'cable': 2500, 'transformer': 2500, 'arrester': 2000}
 VMD_AUTO_K = True  # False=固定K=3, True=自动优化
 SEQ_LEN = 6
 SLIDING_STRIDE = 1  # 滑动窗口步长，stride=1最大化训练样本(42个)
@@ -207,7 +208,7 @@ def _generate_all_data(months):
     winter_pool = np.array([0, 1, 11])
     cable_is_zero = np.zeros(n, dtype=bool)
     for y in range(5):
-        nz = rng_cable.choice([1, 2])  # 每年1-2个零值月(原3个→减50%)
+        nz = 2  # 每年2个零值月(原3个→减30%)
         zero_months = rng_cable.choice(winter_pool, size=nz, replace=False)
         for zm in zero_months:
             cable_is_zero[y*12 + zm] = True
@@ -255,7 +256,7 @@ def _generate_all_data(months):
     rng_trans = np.random.RandomState(RANDOM_SEED + 13)
     trans_is_zero = np.zeros(n, dtype=bool)
     for y in range(5):
-        nz = rng_trans.choice([1, 2])  # 每年1-2个零值月(原3个→减50%)
+        nz = 2  # 每年2个零值月(原3个→减30%)
         zero_months = rng_trans.choice(winter_pool, size=nz, replace=False)
         for zm in zero_months:
             trans_is_zero[y*12 + zm] = True
@@ -304,27 +305,25 @@ def _generate_all_data(months):
     peak_may_shape = np.exp(-0.5 * ((month_idx - 4) / 0.6) ** 2)
     peak_aug_shape = np.exp(-0.5 * ((month_idx - 7) / 0.6) ** 2)
 
-    # 每年独立随机: 峰型 + 基线 + 噪声 + 趋势
+    # 80%双峰年: 随机选1年非双峰, 其余4年双峰
     yearly_amp1 = np.zeros(5)
     yearly_amp2 = np.zeros(5)
     yearly_base = np.zeros(5)
     yearly_noise_std = np.zeros(5)
     yearly_trend = np.zeros(5)
-    year_tags = []
+    single_year = rng_arr.choice(5)  # 唯一的非双峰年
+    single_type = rng_arr.choice(['peak_may', 'peak_aug'])
     for y in range(5):
-        pattern = rng_arr.choice(['dual', 'peak_may', 'peak_aug'], p=[0.4, 0.3, 0.3])
-        if pattern == 'dual':
+        if y == single_year:
+            if single_type == 'peak_may':
+                yearly_amp1[y] = rng_arr.uniform(38, 50)
+                yearly_amp2[y] = rng_arr.uniform(3, 12)
+            else:
+                yearly_amp1[y] = rng_arr.uniform(3, 12)
+                yearly_amp2[y] = rng_arr.uniform(42, 55)
+        else:
             yearly_amp1[y] = rng_arr.uniform(30, 42)
             yearly_amp2[y] = rng_arr.uniform(38, 52)
-            year_tags.append('双峰')
-        elif pattern == 'peak_may':
-            yearly_amp1[y] = rng_arr.uniform(38, 50)
-            yearly_amp2[y] = rng_arr.uniform(3, 12)   # 8月极弱
-            year_tags.append('仅5月峰')
-        else:
-            yearly_amp1[y] = rng_arr.uniform(3, 12)    # 5月极弱
-            yearly_amp2[y] = rng_arr.uniform(42, 55)
-            year_tags.append('仅8月峰')
         yearly_base[y] = rng_arr.uniform(28, 38)
         yearly_noise_std[y] = rng_arr.uniform(1.5, 3.0)
         yearly_trend[y] = rng_arr.uniform(0.0, 0.08)
@@ -670,9 +669,9 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
                      material, demand_scaler):
     """模型二: VMD(仅训练集) → IMF外推 → 全部分量+4因子 → CatBoost"""
     # VMD K值优化 + 仅对训练集需求量进行分解，避免 Look-Ahead Bias
-    opt_k = vmd_optimize_k(y_train)
+    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
     logger.info(f"  [VMD-CatBoost] VMD最优K={opt_k}")
-    u_full, _, omega, _, _ = vmd_decompose_full(y_train, K=opt_k)  # (opt_k, 48)
+    u_full, _, omega, _, _ = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])  # (opt_k, 48)
 
     # IMF 相关性筛选
     keep_idx = filter_imfs_by_correlation(u_full, y_train)
@@ -714,9 +713,9 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     top4 = get_top_factors(material)
 
     # 1. VMD K值优化 + 仅对训练集分解，避免 Look-Ahead Bias
-    opt_k = vmd_optimize_k(y_train)
+    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
     logger.info(f"  [VMD-LSTM-CatBoost] VMD最优K={opt_k}")
-    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k)
+    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
 
     # 2. IMF相关性筛选（始终保留残差/最低频分量）
     keep_idx = filter_imfs_by_correlation(u_full, y_train)
@@ -763,7 +762,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6, dropout=0.25)
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=8, dropout=0.25)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
 
     mf_model.eval()
@@ -833,11 +832,11 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     top4 = get_top_factors(material)
 
     # 1. VMD K值优化 + 仅对训练集分解
-    opt_k = vmd_optimize_k(y_train)
+    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
     logger.info(f"  [VMD-LSTM直接求和] VMD最优K={opt_k} → 1×MultiFeatureLSTM(hidden=8,do=0.25) + "
                 f"N×SingleFeatureLSTM(hidden=6,do=0.25) → 直接求和 | "
                 f"序列长度(seq_len)={seq_len}, 输入特征数(input_features)=4(top-4因子)")
-    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k)
+    u_full, _, omega, residual_idx, all_modal_indices = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
 
     # 2. IMF相关性筛选（始终保留残差/最低频分量）
     keep_idx = filter_imfs_by_correlation(u_full, y_train)
@@ -877,7 +876,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6, dropout=0.25)
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=8, dropout=0.25)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
 
     mf_model.eval()
@@ -922,9 +921,9 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
 def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
                 material, demand_scaler):
     """模型五: VMD(仅训练集)分解 + SVR核方法端到端预测"""
-    opt_k = vmd_optimize_k(y_train)
+    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
     logger.info(f"  [VMD-SVR] VMD最优K={opt_k}")
-    u_full, _, omega, _, _ = vmd_decompose_full(y_train, K=opt_k)
+    u_full, _, omega, _, _ = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
     keep_idx = filter_imfs_by_correlation(u_full, y_train)
     u_filtered = u_full[keep_idx]
     n_imfs_kept = len(keep_idx)

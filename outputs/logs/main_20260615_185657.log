@@ -1,0 +1,205 @@
+18:56:57 | INFO    | ======================================================================
+18:56:57 | INFO    |   配电网物资需求预测 —— VMD-CatBoost 模型对比实验
+18:56:57 | INFO    |   物资: 10KV电缆 / 柱上变压器台成套设备 / 10kv交流避雷器
+18:56:57 | INFO    |   模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-LSTM / VMD-SVR
+18:56:57 | INFO    | ======================================================================
+18:56:57 | INFO    |   日志文件: outputs/logs\main_20260615_185657.log
+18:56:57 | INFO    | [1/8] 加载数据...
+18:56:57 | INFO    | 读取已有数据文件: inputs/data\data.xlsx
+18:56:57 | INFO    |   Sheet[10KV电缆]: 60 条, demand范围=[0.00, 30.00]
+18:56:57 | INFO    |   Sheet[柱上变压器台成套设备]: 60 条, demand范围=[0.00, 18.00]
+18:56:57 | INFO    |   Sheet[10kv交流避雷器]: 60 条, demand范围=[0.00, 84.00]
+18:57:06 | INFO    |   [图表] 需求量曲线 → outputs/figures\demand_curves_60m.png
+18:57:06 | INFO    | 
+18:57:06 | INFO    | [2/8] 处理 10KV电缆 (cable)...
+18:57:06 | INFO    |   Top-4 影响因子: ['investment', 'history_demand', 'load_growth', 'equipment_cost']
+18:57:06 | INFO    |   [特征工程] 原始4因子 + lag1/lag2 + month_sin/cos = 8维特征
+18:57:06 | DEBUG   |   训练集: 48月, 测试集: 12月
+18:57:06 | INFO    |   [3/8] 模型一: CatBoost...
+18:57:06 | INFO    |   [CatBoost基线] iterations=2000, lr=0.015, depth=7, l2=3, RMSE, 全8维特征
+18:57:06 | INFO    |         MSE=61.1241 RMSE=7.8182 MAE=5.9512 R^2=0.3686
+18:57:06 | INFO    |   [4/8] 模型二: VMD-CatBoost...
+18:57:06 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:06 | INFO    |   [VMD-CatBoost] VMD最优K=3
+18:57:06 | INFO    |   [VMD-CatBoost] IMF筛选: 3→3个 (保留[0, 1, 2])
+18:57:07 | INFO    |         MSE=67.6471 RMSE=8.2248 MAE=6.3986 R^2=0.3012
+18:57:11 | INFO    |   [图表] VMD分解图(cable) → outputs/figures\vmd_decomposition_cable.png
+18:57:11 | INFO    |   [5/8] 模型三: VMD-LSTM-CatBoost...
+18:57:11 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:11 | INFO    |   [VMD-LSTM-CatBoost] VMD最优K=3
+18:57:11 | INFO    |   [VMD-LSTM-CatBoost] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+18:57:11 | INFO    |   [LSTM架构] MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:11 | INFO    |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:13 | DEBUG   |   [LSTM收敛] epoch=149, best_loss=0.006665
+18:57:13 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:13 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:14 | DEBUG   |   [LSTM收敛] epoch=72, best_loss=0.012034
+18:57:14 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:14 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:14 | DEBUG   |   [LSTM收敛] epoch=220, best_loss=0.004701
+18:57:16 | INFO    |         MSE=42.3364 RMSE=6.5066 MAE=5.0153 R^2=0.5627
+18:57:16 | INFO    |   [6/8] 模型四: VMD-LSTM(直接求和)...
+18:57:16 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:16 | INFO    |   [VMD-LSTM直接求和] VMD最优K=3 → 1×MultiFeatureLSTM(hidden=8,do=0.25) + N×SingleFeatureLSTM(hidden=6,do=0.25) → 直接求和 | 序列长度(seq_len)=6, 输入特征数(input_features)=4(top-4因子)
+18:57:16 | INFO    |   [VMD-LSTM直接求和] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+18:57:16 | INFO    |   [LSTM架构] MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:16 | INFO    |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:16 | DEBUG   |   [LSTM收敛] epoch=105, best_loss=0.001217
+18:57:16 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:16 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:17 | DEBUG   |   [LSTM收敛] epoch=175, best_loss=0.010095
+18:57:17 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:17 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:18 | DEBUG   |   [LSTM收敛] epoch=267, best_loss=0.005263
+18:57:18 | INFO    |         MSE=98.9786 RMSE=9.9488 MAE=8.6960 R^2=-0.0224
+18:57:18 | INFO    |   [7/8] 模型五: VMD-SVR...
+18:57:18 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:18 | INFO    |   [VMD-SVR] VMD最优K=3
+18:57:18 | INFO    |   [VMD-SVR] IMF筛选: 3→3个 (保留[0, 1, 2])
+18:57:18 | INFO    |   [SVR超参数] kernel=rbf, C=[0.1, 1, 10, 100], gamma=['scale', 'auto', 0.01, 0.1], epsilon=[0.01, 0.05, 0.1, 0.2] | GridSearchCV(cv=3, scoring=neg_mse) | 输入特征数(input_features)=11 (3个IMF+4因子)
+18:57:18 | INFO    |   [SVR最优参数] C=100, gamma=auto, epsilon=0.1
+18:57:18 | INFO    |         MSE=81.4694 RMSE=9.0260 MAE=7.3043 R^2=0.1584
+18:57:19 | INFO    |   [图表] 特征重要性(cable) → outputs/figures\feature_importance_cable.png
+18:57:19 | INFO    | 
+18:57:19 | INFO    | [2/8] 处理 柱上变压器台成套设备 (transformer)...
+18:57:19 | INFO    |   Top-4 影响因子: ['load_growth', 'investment', 'history_demand', 'equipment_cost']
+18:57:19 | INFO    |   [特征工程] 原始4因子 + lag1/lag2 + month_sin/cos = 8维特征
+18:57:19 | DEBUG   |   训练集: 48月, 测试集: 12月
+18:57:19 | INFO    |   [3/8] 模型一: CatBoost...
+18:57:19 | INFO    |   [CatBoost基线] iterations=2000, lr=0.015, depth=7, l2=3, RMSE, 全8维特征
+18:57:19 | INFO    |         MSE=24.0758 RMSE=4.9067 MAE=4.5556 R^2=0.3353
+18:57:19 | INFO    |   [4/8] 模型二: VMD-CatBoost...
+18:57:19 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:19 | INFO    |   [VMD-CatBoost] VMD最优K=3
+18:57:19 | INFO    |   [VMD-CatBoost] IMF筛选: 3→3个 (保留[0, 1, 2])
+18:57:20 | INFO    |         MSE=41.8175 RMSE=6.4666 MAE=6.0281 R^2=-0.1545
+18:57:24 | INFO    |   [图表] VMD分解图(transformer) → outputs/figures\vmd_decomposition_transformer.png
+18:57:24 | INFO    |   [5/8] 模型三: VMD-LSTM-CatBoost...
+18:57:24 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:24 | INFO    |   [VMD-LSTM-CatBoost] VMD最优K=3
+18:57:24 | INFO    |   [VMD-LSTM-CatBoost] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+18:57:24 | INFO    |   [LSTM架构] MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:24 | INFO    |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:25 | DEBUG   |   [LSTM收敛] epoch=214, best_loss=0.002331
+18:57:25 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:25 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:26 | DEBUG   |   [LSTM收敛] epoch=508, best_loss=0.016264
+18:57:26 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:26 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:27 | DEBUG   |   [LSTM收敛] epoch=193, best_loss=0.003662
+18:57:30 | INFO    |         MSE=19.6826 RMSE=4.4365 MAE=4.0996 R^2=0.4566
+18:57:30 | INFO    |   [6/8] 模型四: VMD-LSTM(直接求和)...
+18:57:30 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:30 | INFO    |   [VMD-LSTM直接求和] VMD最优K=3 → 1×MultiFeatureLSTM(hidden=8,do=0.25) + N×SingleFeatureLSTM(hidden=6,do=0.25) → 直接求和 | 序列长度(seq_len)=6, 输入特征数(input_features)=4(top-4因子)
+18:57:30 | INFO    |   [VMD-LSTM直接求和] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+18:57:30 | INFO    |   [LSTM架构] MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:30 | INFO    |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:30 | DEBUG   |   [LSTM收敛] epoch=178, best_loss=0.004889
+18:57:30 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:30 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:33 | DEBUG   |   [LSTM收敛] epoch=541, best_loss=0.016327
+18:57:33 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:33 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:33 | DEBUG   |   [LSTM收敛] epoch=165, best_loss=0.005031
+18:57:33 | INFO    |         MSE=54.1201 RMSE=7.3566 MAE=6.7697 R^2=-0.4941
+18:57:33 | INFO    |   [7/8] 模型五: VMD-SVR...
+18:57:33 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:33 | INFO    |   [VMD-SVR] VMD最优K=3
+18:57:33 | INFO    |   [VMD-SVR] IMF筛选: 3→3个 (保留[0, 1, 2])
+18:57:33 | INFO    |   [SVR超参数] kernel=rbf, C=[0.1, 1, 10, 100], gamma=['scale', 'auto', 0.01, 0.1], epsilon=[0.01, 0.05, 0.1, 0.2] | GridSearchCV(cv=3, scoring=neg_mse) | 输入特征数(input_features)=11 (3个IMF+4因子)
+18:57:34 | INFO    |   [SVR最优参数] C=100, gamma=0.01, epsilon=0.2
+18:57:34 | INFO    |         MSE=59.9461 RMSE=7.7425 MAE=6.9232 R^2=-0.6550
+18:57:35 | INFO    |   [图表] 特征重要性(transformer) → outputs/figures\feature_importance_transformer.png
+18:57:35 | INFO    | 
+18:57:35 | INFO    | [2/8] 处理 10kv交流避雷器 (arrester)...
+18:57:35 | INFO    |   Top-4 影响因子: ['lightning_count', 'typhoon_count', 'rainstorm_count', 'load_growth']
+18:57:35 | INFO    |   [特征工程] 原始4因子 + lag1/lag2 + month_sin/cos = 8维特征
+18:57:35 | DEBUG   |   训练集: 48月, 测试集: 12月
+18:57:35 | INFO    |   [3/8] 模型一: CatBoost...
+18:57:35 | INFO    |   [CatBoost基线] iterations=2000, lr=0.015, depth=7, l2=3, RMSE, 全8维特征
+18:57:35 | INFO    |         MSE=128.1665 RMSE=11.3211 MAE=8.0262 R^2=0.5979
+18:57:35 | INFO    |   [4/8] 模型二: VMD-CatBoost...
+18:57:35 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:35 | INFO    |   [VMD-CatBoost] VMD最优K=3
+18:57:35 | INFO    |   [VMD-CatBoost] IMF筛选: 3→3个 (保留[0, 1, 2])
+18:57:36 | INFO    |         MSE=203.6936 RMSE=14.2721 MAE=9.3875 R^2=0.3610
+18:57:42 | INFO    |   [图表] VMD分解图(arrester) → outputs/figures\vmd_decomposition_arrester.png
+18:57:42 | INFO    |   [5/8] 模型三: VMD-LSTM-CatBoost...
+18:57:42 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:42 | INFO    |   [VMD-LSTM-CatBoost] VMD最优K=3
+18:57:42 | INFO    |   [VMD-LSTM-CatBoost] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+18:57:42 | INFO    |   [LSTM架构] MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:42 | INFO    |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:43 | DEBUG   |   [LSTM收敛] epoch=316, best_loss=0.000482
+18:57:43 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:43 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:47 | DEBUG   |   [LSTM收敛] epoch=1000(max), best_loss=0.019349
+18:57:47 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:47 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:49 | DEBUG   |   [LSTM收敛] epoch=394, best_loss=0.009611
+18:57:51 | INFO    |         MSE=181.6916 RMSE=13.4793 MAE=8.5456 R^2=0.4300
+18:57:51 | INFO    |   [6/8] 模型四: VMD-LSTM(直接求和)...
+18:57:51 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:51 | INFO    |   [VMD-LSTM直接求和] VMD最优K=3 → 1×MultiFeatureLSTM(hidden=8,do=0.25) + N×SingleFeatureLSTM(hidden=6,do=0.25) → 直接求和 | 序列长度(seq_len)=6, 输入特征数(input_features)=4(top-4因子)
+18:57:51 | INFO    |   [VMD-LSTM直接求和] IMF筛选: 3→3个 | 残差=IMF1(新idx=0), 模态=['IMF2', 'IMF3']
+18:57:51 | INFO    |   [LSTM架构] MultiFeatureLSTM | input_size=5, hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:51 | INFO    |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:52 | DEBUG   |   [LSTM收敛] epoch=173, best_loss=0.009863
+18:57:52 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:52 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:53 | DEBUG   |   [LSTM收敛] epoch=156, best_loss=0.016485
+18:57:53 | DEBUG   |   [LSTM架构] SingleFeatureLSTM | hidden_size=6, num_layers=2, dropout=0.25, ReduceLROnPlateau | CNN/池化层: 无(本模型不使用卷积/池化)
+18:57:53 | DEBUG   |   [训练配置] optimizer=Adam, lr=0.002, weight_decay=0.0001, epochs=1000, patience=60, loss=MSELoss, batch_size=full_batch(全批次), device=cpu | 训练样本数(train_samples)=42, 序列长度(seq_len)=6
+18:57:55 | DEBUG   |   [LSTM收敛] epoch=569, best_loss=0.010432
+18:57:55 | INFO    |         MSE=348.3661 RMSE=18.6646 MAE=12.4814 R^2=-0.0929
+18:57:55 | INFO    |   [7/8] 模型五: VMD-SVR...
+18:57:55 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+18:57:55 | INFO    |   [VMD-SVR] VMD最优K=3
+18:57:55 | INFO    |   [VMD-SVR] IMF筛选: 3→3个 (保留[0, 1, 2])
+18:57:55 | INFO    |   [SVR超参数] kernel=rbf, C=[0.1, 1, 10, 100], gamma=['scale', 'auto', 0.01, 0.1], epsilon=[0.01, 0.05, 0.1, 0.2] | GridSearchCV(cv=3, scoring=neg_mse) | 输入特征数(input_features)=11 (3个IMF+4因子)
+18:57:55 | INFO    |   [SVR最优参数] C=100, gamma=auto, epsilon=0.1
+18:57:55 | INFO    |         MSE=477.0421 RMSE=21.8413 MAE=18.4353 R^2=-0.4966
+18:58:02 | INFO    |   [图表] 特征重要性(arrester) → outputs/figures\feature_importance_arrester.png
+18:58:02 | INFO    | 
+18:58:02 | INFO    | [8/8] 汇总评估与可视化...
+18:58:02 | INFO    | 
+18:58:02 | INFO    | ========================================================================================================================
+18:58:02 | INFO    | 评估指标汇总表
+18:58:02 | INFO    | ========================================================================================================================
+18:58:02 | INFO    | 物资               模型                              MSE         RMSE          MAE          R^2
+18:58:02 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+18:58:02 | INFO    | 10KV电缆           CatBoost                    61.1241       7.8182       5.9512       0.3686
+18:58:02 | INFO    |                  VMD-CatBoost                67.6471       8.2248       6.3986       0.3012
+18:58:02 | INFO    |                  VMD-LSTM-CatBoost           42.3364       6.5066       5.0153       0.5627
+18:58:02 | INFO    |                  VMD-LSTM                    98.9786       9.9488       8.6960      -0.0224
+18:58:02 | INFO    |                  VMD-SVR                     81.4694       9.0260       7.3043       0.1584
+18:58:02 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+18:58:02 | INFO    | 柱上变压器台成套设备       CatBoost                    24.0758       4.9067       4.5556       0.3353
+18:58:02 | INFO    |                  VMD-CatBoost                41.8175       6.4666       6.0281      -0.1545
+18:58:02 | INFO    |                  VMD-LSTM-CatBoost           19.6826       4.4365       4.0996       0.4566
+18:58:02 | INFO    |                  VMD-LSTM                    54.1201       7.3566       6.7697      -0.4941
+18:58:02 | INFO    |                  VMD-SVR                     59.9461       7.7425       6.9232      -0.6550
+18:58:02 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+18:58:02 | INFO    | 10kv交流避雷器        CatBoost                   128.1665      11.3211       8.0262       0.5979
+18:58:02 | INFO    |                  VMD-CatBoost               203.6936      14.2721       9.3875       0.3610
+18:58:02 | INFO    |                  VMD-LSTM-CatBoost          181.6916      13.4793       8.5456       0.4300
+18:58:02 | INFO    |                  VMD-LSTM                   348.3661      18.6646      12.4814      -0.0929
+18:58:02 | INFO    |                  VMD-SVR                    477.0421      21.8413      18.4353      -0.4966
+18:58:02 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+18:58:02 | INFO    | 
+18:58:02 | INFO    |   [文件] 指标JSON → outputs/figures\metrics_summary.json
+18:58:04 | INFO    |   [图表] 预测对比图(cable) → outputs/figures\prediction_comparison_cable.png
+18:58:06 | INFO    |   [图表] 预测对比图(transformer) → outputs/figures\prediction_comparison_transformer.png
+18:58:10 | INFO    |   [图表] 预测对比图(arrester) → outputs/figures\prediction_comparison_arrester.png
+18:58:15 | INFO    |   [图表] 指标对比图 → outputs/figures\metrics_comparison.png
+18:58:15 | INFO    | 
+18:58:15 | INFO    | ======================================================================
+18:58:15 | INFO    |   模型性能排序 (按R^2)
+18:58:15 | INFO    | ======================================================================
+18:58:15 | INFO    |   10KV电缆: [1st] VMD-LSTM-CatBoost (R^2=0.5627)  [2nd] CatBoost (R^2=0.3686)  [3rd] VMD-CatBoost (R^2=0.3012)
+18:58:15 | INFO    |   柱上变压器台成套设备: [1st] VMD-LSTM-CatBoost (R^2=0.4566)  [2nd] CatBoost (R^2=0.3353)  [3rd] VMD-CatBoost (R^2=-0.1545)
+18:58:15 | INFO    |   10kv交流避雷器: [1st] CatBoost (R^2=0.5979)  [2nd] VMD-LSTM-CatBoost (R^2=0.4300)  [3rd] VMD-CatBoost (R^2=0.3610)
+18:58:15 | INFO    | 
+18:58:15 | INFO    | 所有图表已保存至: C:\Users\lilacseeking\PycharmProjects\vmd-catboost\outputs\figures/
+18:58:15 | INFO    | 日志文件: C:\Users\lilacseeking\PycharmProjects\vmd-catboost\outputs\logs\main_20260615_185657.log
+18:58:15 | INFO    | 完成!
