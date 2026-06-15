@@ -112,8 +112,10 @@ FACTOR_LABELS = {'load_growth': '负荷增长量(分)', 'investment': '工程投
 VMD_K = 5
 VMD_ALPHA = 2000
 VMD_ALPHA_MAP = {'cable': 2500, 'transformer': 2500, 'arrester': 2000}
-TF_MULTI_DIM = {'cable': 32, 'transformer': 32, 'arrester': 24}
+TF_MULTI_DIM = {'cable': 32, 'transformer': 24, 'arrester': 28}
 TF_NLAYERS = {'cable': 2, 'transformer': 2, 'arrester': 2}
+TF_LR = {'cable': 0.003, 'transformer': 0.001, 'arrester': 0.003}
+TF_EPOCHS = {'cable': 800, 'transformer': 500, 'arrester': 500}
 TF_SINGLE_DIM = {'cable': 16, 'transformer': 16, 'arrester': 12}
 TF_EPOCHS = {'cable': 500, 'transformer': 500, 'arrester': 500}
 TF_DROPOUT = {'cable': 0.2, 'transformer': 0.2, 'arrester': 0.25}
@@ -604,7 +606,9 @@ def create_full_sequence(data, train_len=36, pred_len=12):
     return X, y
 
 
-def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=0.002, weight_decay=1e-4):
+def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=None, weight_decay=1e-4):
+    if lr is None:
+        lr = 0.002
     """训练LSTM模型（2层LSTM+dropout+ReduceLROnPlateau），返回训练好的模型"""
     model = model.to(DEVICE)
     X_t = torch.FloatTensor(X).to(DEVICE)
@@ -741,6 +745,7 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
 def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
                           material, demand_scaler):
     """模型三: VMD(仅训练集) → 残差Transformer + N模态Transformer → CatBoost融合"""
+    np.random.seed(RANDOM_SEED)  # VMD随机隔离
     seq_len = TF_SEQ_LEN.get(material, SEQ_LEN)
     top4 = get_top_factors(material)
 
@@ -798,7 +803,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     tf_ep = TF_EPOCHS[material]
     tf_do = TF_DROPOUT[material]
     mf_model = MultiFeatureTransformer(input_size=5, hidden_size=mf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
-    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=tf_ep)
+    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=tf_ep, lr=TF_LR.get(material, 0.002))
 
     mf_model.eval()
     with torch.no_grad():
@@ -817,7 +822,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
         sf_model = SingleFeatureTransformer(hidden_size=sf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
-        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=tf_ep)
+        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=tf_ep, lr=TF_LR.get(material, 0.002))
 
         sf_model.eval()
         with torch.no_grad():
@@ -916,7 +921,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     tf_ep = TF_EPOCHS[material]
     tf_do = TF_DROPOUT[material]
     mf_model = MultiFeatureTransformer(input_size=5, hidden_size=mf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
-    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=tf_ep)
+    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=tf_ep, lr=TF_LR.get(material, 0.002))
 
     mf_model.eval()
     with torch.no_grad():
@@ -934,7 +939,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
         sf_model = SingleFeatureTransformer(hidden_size=sf_hidden, dropout=tf_do, num_layers=TF_NLAYERS.get(material,2))
-        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=tf_ep)
+        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=tf_ep, lr=TF_LR.get(material, 0.002))
 
         sf_model.eval()
         with torch.no_grad():
