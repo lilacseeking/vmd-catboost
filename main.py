@@ -194,16 +194,35 @@ def _generate_all_data(months):
     rainstorm_count = np.clip(np.round(rainstorm_count, 3), 0, 1)
 
     data_dict = {}
+    yr_idx = t // 12
+    month_idx = t % 12
 
     # ====================================================================
-    # 10KV电缆
-    # 需求: 冬季(12-2月)为0；非0时 10-30 (10千米)，增大波动性
+    # 10KV电缆 [R27] 年峰值15-30+大致递增+零值窗口随机平移
+    # 每年连续3个冬季月为零, 窗口随机平移±1月 → 不同年零值月可不同
     # 因子: investment(#1), history_demand(#2), load_growth(#3), equipment_cost(#4)
     # ====================================================================
-    cable_low = np.isin(t % 12, [0, 1, 11])
-    cable_noise = np.random.randn(n) * 5 + np.sin(np.arange(n) * 0.3) * 2  # 年际波动
-    cable_raw = 20 + np.sin(2 * np.pi * t / 12) * 4 + 0.2 * t + cable_noise
-    cable_demand = np.where(cable_low, 0, np.clip(np.round(cable_raw), 10, 30))
+    rng_cable = np.random.RandomState(RANDOM_SEED + 1)
+    winter_pool = np.array([0, 1, 11])
+    cable_is_zero = np.zeros(n, dtype=bool)
+    for y in range(5):
+        nz = rng_cable.choice([1, 2])  # 每年1-2个零值月(原3个→减50%)
+        zero_months = rng_cable.choice(winter_pool, size=nz, replace=False)
+        for zm in zero_months:
+            cable_is_zero[y*12 + zm] = True
+
+    cable_annual_amp = 5.0 + yr_idx * 1.5
+    cable_semi_amp = 2.5 + yr_idx * 0.6
+    cable_quarter_amp = 1.5 + yr_idx * 0.3
+    cable_annual = np.sin(2 * np.pi * t / 12) * cable_annual_amp
+    cable_semi = np.sin(4 * np.pi * t / 12) * cable_semi_amp
+    cable_quarter = np.cos(8 * np.pi * t / 12) * cable_quarter_amp
+    cable_trend = yr_idx * 1.8
+    cable_yearly = np.sin(np.arange(n) * 0.22) * 2.5
+    cable_noise = rng_cable.randn(n) * 2.5
+    cable_raw = 12 + cable_annual + cable_semi + cable_quarter + cable_trend + cable_yearly + cable_noise
+    cable_raw = np.clip(np.round(cable_raw), 0, 30)
+    cable_demand = np.where(cable_is_zero, 0, cable_raw)
     cable_demand = np.maximum(cable_demand, 0)
 
     cable_inv_zero = np.isin(t % 12, [0, 4, 8])
@@ -228,23 +247,29 @@ def _generate_all_data(months):
     })
 
     # ====================================================================
-    # 柱上变压器台成套设备
-    # 需求: 冬季(12-2月)为0；非0时 3-18 套，高波动+多频率+随机尖峰
+    # 柱上变压器台成套设备 [R27] 大振幅+4-7月集中, RNG隔离
+    # 范围: 0-18, 冬季固定为零(变压器对零值位置敏感)
     # 因子: load_growth(#1), investment(#2), history_demand(#3), equipment_cost(#4)
     # ====================================================================
-    trans_low = np.isin(t % 12, [0, 1, 11])
-    # 多频率叠加: 年周期 + 半年周期 + 季度周期 + 年际趋势 + 高噪声
-    seasonal_annual = np.sin(2 * np.pi * t / 12) * 5.0       # 年度季节
-    seasonal_semi = np.sin(4 * np.pi * t / 12) * 1.5         # 半年周期(双峰)
-    seasonal_quarter = np.cos(8 * np.pi * t / 12) * 0.8      # 季度波动
-    trend = 0.15 * t                                           # 长期增长趋势
-    yearly_var = np.sin(np.arange(n) * 0.25) * 2.0            # 年际波动(~2年周期)
-    noise = np.random.randn(n) * 3.5                           # 高随机噪声
-    # 随机尖峰: 模拟偶发的大批量采购
-    spike_mask = np.random.rand(n) < 0.08  # 8%概率出现尖峰
-    spikes = np.where(spike_mask, np.random.uniform(3, 8, n), 0)
-    trans_raw = 9 + seasonal_annual + seasonal_semi + seasonal_quarter + trend + yearly_var + noise + spikes
-    trans_demand = np.where(trans_low, 0, np.clip(np.round(trans_raw), 3, 18))
+    rng_trans = np.random.RandomState(RANDOM_SEED + 13)
+    trans_is_zero = np.zeros(n, dtype=bool)
+    for y in range(5):
+        nz = rng_trans.choice([1, 2])  # 每年1-2个零值月(原3个→减50%)
+        zero_months = rng_trans.choice(winter_pool, size=nz, replace=False)
+        for zm in zero_months:
+            trans_is_zero[y*12 + zm] = True
+
+    seasonal_annual = np.sin(2 * np.pi * t / 12) * 7.0
+    seasonal_semi = np.sin(4 * np.pi * t / 12) * 3.0
+    seasonal_quarter = np.cos(8 * np.pi * t / 12) * 1.5
+    trend = 0.12 * t
+    yearly_var = np.sin(np.arange(n) * 0.25) * 2.5
+    noise = rng_trans.randn(n) * 3.5
+    spike_mask = rng_trans.rand(n) < 0.08
+    spikes = np.where(spike_mask, rng_trans.uniform(3, 9, n), 0)
+    trans_raw = 7 + seasonal_annual + seasonal_semi + seasonal_quarter + trend + yearly_var + noise + spikes
+    trans_raw = np.clip(np.round(trans_raw), 0, 18)
+    trans_demand = np.where(trans_is_zero, 0, trans_raw)
     trans_demand = np.maximum(trans_demand, 0)
 
     trans_inv_zero = np.isin(t % 12, [1, 5, 9])
@@ -269,18 +294,60 @@ def _generate_all_data(months):
     })
 
     # ====================================================================
-    # 10kv交流避雷器
-    # 需求: 干季(11-3月)为0；雨季双峰: 5月(雷雨季开始)+8月(台风+雷暴高发)
+    # 10kv交流避雷器 [R28] 双峰策略(保留但非强制) + 年度趋势差异化
+    # 每年随机: 双峰年(40%) / 仅5月单峰(30%) / 仅8月单峰(30%)
+    # 年度基线+噪声+趋势均独立随机, 打破"每年一样"的单调性
     # 因子: lightning_count(#1), typhoon_count(#2), rainstorm_count(#3), load_growth(#4)
     # ====================================================================
-    arr_low = np.isin(t % 12, [0, 1, 2, 10, 11])
-    # 双高斯峰结构: 5月(μ=4)和8月(μ=7)
-    month_in_year = t % 12
-    peak_may = np.exp(-0.5 * ((month_in_year - 4) / 1.2) ** 2)  # 5月 峰值
-    peak_aug = np.exp(-0.5 * ((month_in_year - 7) / 1.0) ** 2)  # 8月 峰值(更高)
-    seasonal_dual = peak_may * 18 + peak_aug * 22  # 8月峰值高于5月
-    arr_raw = 70 + seasonal_dual + 0.08 * t + np.random.randn(n) * 4
-    arr_demand = np.where(arr_low, 0, np.clip(np.round(arr_raw), 55, 105))
+    rng_arr = np.random.RandomState(RANDOM_SEED + 3)
+    peak_may_shape = np.exp(-0.5 * ((month_idx - 4) / 0.6) ** 2)
+    peak_aug_shape = np.exp(-0.5 * ((month_idx - 7) / 0.6) ** 2)
+
+    # 每年独立随机: 峰型 + 基线 + 噪声 + 趋势
+    yearly_amp1 = np.zeros(5)
+    yearly_amp2 = np.zeros(5)
+    yearly_base = np.zeros(5)
+    yearly_noise_std = np.zeros(5)
+    yearly_trend = np.zeros(5)
+    year_tags = []
+    for y in range(5):
+        pattern = rng_arr.choice(['dual', 'peak_may', 'peak_aug'], p=[0.4, 0.3, 0.3])
+        if pattern == 'dual':
+            yearly_amp1[y] = rng_arr.uniform(30, 42)
+            yearly_amp2[y] = rng_arr.uniform(38, 52)
+            year_tags.append('双峰')
+        elif pattern == 'peak_may':
+            yearly_amp1[y] = rng_arr.uniform(38, 50)
+            yearly_amp2[y] = rng_arr.uniform(3, 12)   # 8月极弱
+            year_tags.append('仅5月峰')
+        else:
+            yearly_amp1[y] = rng_arr.uniform(3, 12)    # 5月极弱
+            yearly_amp2[y] = rng_arr.uniform(42, 55)
+            year_tags.append('仅8月峰')
+        yearly_base[y] = rng_arr.uniform(28, 38)
+        yearly_noise_std[y] = rng_arr.uniform(1.5, 3.0)
+        yearly_trend[y] = rng_arr.uniform(0.0, 0.08)
+
+    seasonal_dual = np.zeros(n)
+    arr_base = np.zeros(n)
+    arr_noise_std = np.zeros(n)
+    arr_trend = np.zeros(n)
+    for y in range(5):
+        mask = yr_idx == y
+        seasonal_dual[mask] = (peak_may_shape[mask] * yearly_amp1[y] +
+                               peak_aug_shape[mask] * yearly_amp2[y])
+        arr_base[mask] = yearly_base[y]
+        arr_noise_std[mask] = yearly_noise_std[y]
+        arr_trend[mask] = yearly_trend[y] * t[mask]
+
+    arr_raw = arr_base + seasonal_dual + arr_trend + rng_arr.randn(n) * arr_noise_std
+    arr_raw = np.clip(np.round(arr_raw), 0, 105)
+    dry_pool = np.array([0, 1, 2, 10, 11])
+    arr_is_zero = np.zeros(n, dtype=bool)
+    for y in range(5):
+        zm = rng_arr.choice(dry_pool)
+        arr_is_zero[y*12 + zm] = True
+    arr_demand = np.where(arr_is_zero, 0, arr_raw)
     arr_demand = np.maximum(arr_demand, 0)
 
     arr_inv_zero = np.isin(t % 12, [0, 3, 7])
@@ -1041,6 +1108,29 @@ def plot_metrics_comparison(all_metrics):
     logger.info(f"  [图表] 指标对比图 → {path}")
 
 
+def plot_demand_curves(data_dict):
+    """60个月三种物资的实际需求量曲线图"""
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10))
+    colors = {'cable': '#2196F3', 'transformer': '#4CAF50', 'arrester': '#FF5722'}
+    y_units = {'cable': '(10千米)', 'transformer': '(套)', 'arrester': '(台)'}
+    for idx, material in enumerate(MATERIALS):
+        ax = axes[idx]
+        df = data_dict[material]
+        ax.plot(df['date'], df['demand'], color=colors[material], linewidth=1.5, marker='o', markersize=3)
+        ax.fill_between(df['date'], 0, df['demand'], color=colors[material], alpha=0.08)
+        ax.set_ylabel(f'{MATERIAL_LABELS[material]}\n{y_units[material]}', fontsize=10)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+        ax.axvline(x=pd.Timestamp('2024-01-01'), color='black', linestyle='--', linewidth=1.2)
+    axes[0].set_title('配电网物资需求量 — 60个月完整序列 (2020.01–2024.12)', fontsize=13, fontweight='bold')
+    axes[2].set_xlabel('日期')
+    plt.tight_layout()
+    path = os.path.join(OUTPUT_DIR, 'demand_curves_60m.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    logger.info(f"  [图表] 需求量曲线 → {path}")
+
+
 def print_metrics_table(all_metrics):
     """打印评估指标汇总表（同时输出到控制台和日志）"""
     lines = []
@@ -1089,6 +1179,8 @@ def main():
 
     # Step 3+4：建模与可视化（抑制 Windows 字体权限错误噪音）
     with suppress_font_stderr():
+        plot_demand_curves(data_dict)
+
         # Step 3: 对三种物资分别建模
         for material in MATERIALS:
             label = MATERIAL_LABELS[material]
