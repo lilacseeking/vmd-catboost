@@ -111,6 +111,7 @@ FACTOR_LABELS = {'load_growth': '负荷增长量(分)', 'investment': '工程投
                  'rainstorm_count': '暴雨(分)'}
 VMD_K = 5
 VMD_ALPHA = 2000
+VMD_AUTO_K = True  # False=固定K=3, True=自动优化
 SEQ_LEN = 6
 SLIDING_STRIDE = 1  # 滑动窗口步长，stride=1最大化训练样本(42个)
 RANDOM_SEED = 42
@@ -455,15 +456,15 @@ def preprocess_data(df, material):
 
 
 # ===================== 4. VMD 分解 =====================
-def vmd_decompose_full(signal, K=VMD_K):
+def vmd_decompose_full(signal, K=VMD_K, alpha=VMD_ALPHA):
     """对需求量序列进行VMD分解，返回所有IMF和残差/模态索引"""
-    u, u_hat, omega = VMD(signal, VMD_ALPHA, 0, K, 0, 1, 1e-7)
+    u, u_hat, omega = VMD(signal, alpha, 0, K, 0, 1, 1e-7)
     residual_idx = int(np.argmin(np.abs(omega[-1])))
     modal_indices = [i for i in range(K) if i != residual_idx]
     return u, u_hat, omega, residual_idx, modal_indices
 
 
-def extrapolate_imfs(imfs_train, n_test, residual_idx=None, method='trend_linear'):
+def extrapolate_imfs(imfs_train, n_test, residual_idx=None, method='persistence'):
     """将训练集IMF外推至测试集长度（避免Look-Ahead Bias）
 
     - trend_linear: 趋势分量用线性回归外推，模态分量用persistence (默认)
@@ -484,13 +485,15 @@ def extrapolate_imfs(imfs_train, n_test, residual_idx=None, method='trend_linear
     return result
 
 
-def vmd_optimize_k(signal, k_range=range(3, 8), alpha=VMD_ALPHA, freq_ratio_threshold=1.5):
+def vmd_optimize_k(signal, k_range=range(2, 7), alpha=VMD_ALPHA, freq_ratio_threshold=1.5):
     """通过中心频率分离度确定最优K值，避免过分解或欠分解
 
     对 K=3~7 逐一尝试VMD分解，检查最终中心频率的分离度：
     - 若相邻中心频率比值均 > freq_ratio_threshold，说明分解充分，尝试更大K
     - 若出现频率混叠（比值过小），说明过分解，停止并返回上一个有效K
     """
+    if not VMD_AUTO_K:
+        return 3
     best_k = 3
     for k in k_range:
         try:
@@ -528,12 +531,12 @@ def filter_imfs_by_correlation(imfs, signal, corr_threshold=0.1):
 
 # ===================== 5. LSTM 模型定义 =====================
 class MultiFeatureLSTM(nn.Module):
-    """多特征LSTM: 残差分量+4因子 → 预测值（2层LSTM+dropout）"""
-    def __init__(self, input_size=5, hidden_size=8, dropout=0.25):
+    """多特征LSTM: 残差分量+4因子 → 预测值（2层LSTM+dropout+双层FC）"""
+    def __init__(self, input_size=5, hidden_size=6, dropout=0.25):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, batch_first=True, dropout=dropout)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, 1)
+        self.fc = nn.Sequential(nn.Linear(hidden_size, hidden_size//2), nn.ReLU(), nn.Linear(hidden_size//2, 1))
 
     def forward(self, x):
         out, _ = self.lstm(x)
@@ -542,12 +545,12 @@ class MultiFeatureLSTM(nn.Module):
 
 
 class SingleFeatureLSTM(nn.Module):
-    """单特征LSTM: 单个模态分量 → 预测值（2层LSTM+dropout）"""
-    def __init__(self, hidden_size=6, dropout=0.25):
+    """单特征LSTM: 单个模态分量 → 预测值（2层LSTM+dropout+双层FC）"""
+    def __init__(self, hidden_size=4, dropout=0.25):
         super().__init__()
         self.lstm = nn.LSTM(1, hidden_size, num_layers=2, batch_first=True, dropout=dropout)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, 1)
+        self.fc = nn.Sequential(nn.Linear(hidden_size, hidden_size//2), nn.ReLU(), nn.Linear(hidden_size//2, 1))
 
     def forward(self, x):
         out, _ = self.lstm(x)
@@ -634,14 +637,14 @@ def train_lstm_model(model, X, y, epochs=1000, patience=60, lr=0.002, weight_dec
 def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler):
     """模型一: 仅使用原始4因子(无特征工程)，CatBoost基线回归预测"""
     # 基线模型只用原始4因子，不用特征工程 → 凸显VMD-LSTM-CatBoost的时序建模优势
-    X_tr_raw = X_train_factors[:, :4].copy()
-    X_te_raw = X_test_factors[:, :4].copy()
-    iters = 1000
-    depth = 4
-    lr = 0.03
-    l2 = 5
+    X_tr_raw = X_train_factors.copy()  # 全8维特征
+    X_te_raw = X_test_factors.copy()
+    iters = 1500
+    depth = 6
+    lr = 0.02
+    l2 = 3
     logger.info(f"  [CatBoost基线] iterations={iters}, lr={lr}, depth={depth}, l2={l2}, "
-                 f"RMSE, 仅4原始因子(无特征工程)")
+                 f"RMSE, 全8维特征")
     model = CatBoostRegressor(
         iterations=iters, learning_rate=lr, depth=depth, l2_leaf_reg=l2,
         loss_function='RMSE', early_stopping_rounds=30,
@@ -760,7 +763,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=8, dropout=0.25)
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6, dropout=0.25)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
 
     mf_model.eval()
@@ -779,7 +782,7 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureLSTM(hidden_size=6, dropout=0.25)
+        sf_model = SingleFeatureLSTM(hidden_size=4, dropout=0.25)
         sf_model = train_lstm_model(sf_model, X_m, y_m)
 
         sf_model.eval()
@@ -874,7 +877,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=8, dropout=0.25)
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=6, dropout=0.25)
     mf_model = train_lstm_model(mf_model, X_r, y_r)
 
     mf_model.eval()
@@ -892,7 +895,7 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureLSTM(hidden_size=6, dropout=0.25)
+        sf_model = SingleFeatureLSTM(hidden_size=4, dropout=0.25)
         sf_model = train_lstm_model(sf_model, X_m, y_m)
 
         sf_model.eval()
