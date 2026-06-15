@@ -1,0 +1,27 @@
+20:04:52 | INFO    | ======================================================================
+20:04:52 | INFO    |   配电网物资需求预测 —— VMD-CatBoost 模型对比实验
+20:04:52 | INFO    |   物资: 10KV电缆 / 柱上变压器台成套设备 / 10kv交流避雷器
+20:04:52 | INFO    |   模型: CatBoost / VMD-CatBoost / VMD-LSTM-CatBoost / VMD-LSTM / VMD-SVR
+20:04:52 | INFO    | ======================================================================
+20:04:52 | INFO    |   日志文件: outputs/logs\main_20260615_200452.log
+20:04:52 | INFO    | [1/8] 加载数据...
+20:04:52 | INFO    | 读取已有数据文件: inputs/data\data.xlsx
+20:04:53 | INFO    |   Sheet[10KV电缆]: 60 条, demand范围=[0.00, 30.00]
+20:04:53 | INFO    |   Sheet[柱上变压器台成套设备]: 60 条, demand范围=[0.00, 18.00]
+20:04:53 | INFO    |   Sheet[10kv交流避雷器]: 60 条, demand范围=[0.00, 87.00]
+20:05:02 | INFO    |   [图表] 需求量曲线 → outputs/figures\demand_curves_60m.png
+20:05:02 | INFO    | 
+20:05:02 | INFO    | [2/8] 处理 10KV电缆 (cable)...
+20:05:02 | INFO    |   Top-4 影响因子: ['investment', 'history_demand', 'load_growth', 'equipment_cost']
+20:05:02 | INFO    |   [特征工程] 原始4因子 + lag1/lag2 + month_sin/cos = 8维特征
+20:05:02 | DEBUG   |   训练集: 48月, 测试集: 12月
+20:05:02 | INFO    |   [3/8] 模型一: CatBoost...
+20:05:02 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, RMSE, 全8维特征
+20:05:03 | INFO    |         MSE=59.6783 RMSE=7.7252 MAE=5.9921 R^2=0.3835
+20:05:03 | INFO    |   [4/8] 模型二: VMD-CatBoost...
+20:05:03 | DEBUG   |   [VMD优化] 最优K=3 (搜索范围[2, 3, 4, 5, 6], 频率分离阈值=1.5)
+20:05:03 | INFO    |   [VMD-CatBoost] VMD最优K=3
+20:05:03 | INFO    |   [VMD-CatBoost] IMF筛选: 3→3个 (保留[0, 1, 2])
+20:05:03 | INFO    |         MSE=67.6471 RMSE=8.2248 MAE=6.3986 R^2=0.3012
+20:05:08 | INFO    |   [图表] VMD分解图(cable) → outputs/figures\vmd_decomposition_cable.png
+20:05:08 | INFO    |   [5/8] 模型三: VMD-LSTM-CatBoost...

@@ -112,11 +112,14 @@ FACTOR_LABELS = {'load_growth': '负荷增长量(分)', 'investment': '工程投
 VMD_K = 5
 VMD_ALPHA = 2000
 VMD_ALPHA_MAP = {'cable': 2500, 'transformer': 2500, 'arrester': 2000}
+LSTM_MULTI_HIDDEN = {'cable': 8, 'transformer': 8, 'arrester': 6}
+LSTM_SINGLE_HIDDEN = {'cable': 4, 'transformer': 4, 'arrester': 3}
+LSTM_EPOCHS = {'cable': 1000, 'transformer': 1000, 'arrester': 1000}
 VMD_AUTO_K = True  # False=固定K=3, True=自动优化
 SEQ_LEN = 6
 SLIDING_STRIDE = 1  # 滑动窗口步长，stride=1最大化训练样本(42个)
 RANDOM_SEED = 42
-DATA_LOCKED = True  # 数据锁定: True=仅读取不重新生成, False=允许自动生成
+DATA_LOCKED = True
 OUTPUT_DIR = 'outputs/figures'
 LOG_DIR = 'outputs/logs'
 DATA_DIR = 'inputs/data'
@@ -296,37 +299,25 @@ def _generate_all_data(months):
     })
 
     # ====================================================================
-    # 10kv交流避雷器 [R28] 双峰策略(保留但非强制) + 年度趋势差异化
-    # 每年随机: 双峰年(40%) / 仅5月单峰(30%) / 仅8月单峰(30%)
-    # 年度基线+噪声+趋势均独立随机, 打破"每年一样"的单调性
+    # 10kv交流避雷器 [R30] 100%双峰固定峰位(5月+8月) + 年度大幅差异化
+    # 峰位固定→VMD频率一致; 振幅/基线/噪声年度独立→打破单调性
     # 因子: lightning_count(#1), typhoon_count(#2), rainstorm_count(#3), load_growth(#4)
     # ====================================================================
     rng_arr = np.random.RandomState(RANDOM_SEED + 3)
-    peak_may_shape = np.exp(-0.5 * ((month_idx - 4) / 0.6) ** 2)
-    peak_aug_shape = np.exp(-0.5 * ((month_idx - 7) / 0.6) ** 2)
+    peak_may = np.exp(-0.5 * ((month_idx - 4) / 0.7) ** 2)   # 5月 固定峰位
+    peak_aug = np.exp(-0.5 * ((month_idx - 7) / 0.7) ** 2)   # 8月 固定峰位
 
-    # 80%双峰年: 随机选1年非双峰, 其余4年双峰
     yearly_amp1 = np.zeros(5)
     yearly_amp2 = np.zeros(5)
     yearly_base = np.zeros(5)
     yearly_noise_std = np.zeros(5)
     yearly_trend = np.zeros(5)
-    single_year = rng_arr.choice(5)  # 唯一的非双峰年
-    single_type = rng_arr.choice(['peak_may', 'peak_aug'])
     for y in range(5):
-        if y == single_year:
-            if single_type == 'peak_may':
-                yearly_amp1[y] = rng_arr.uniform(38, 50)
-                yearly_amp2[y] = rng_arr.uniform(3, 12)
-            else:
-                yearly_amp1[y] = rng_arr.uniform(3, 12)
-                yearly_amp2[y] = rng_arr.uniform(42, 55)
-        else:
-            yearly_amp1[y] = rng_arr.uniform(30, 42)
-            yearly_amp2[y] = rng_arr.uniform(38, 52)
-        yearly_base[y] = rng_arr.uniform(28, 38)
-        yearly_noise_std[y] = rng_arr.uniform(1.5, 3.0)
-        yearly_trend[y] = rng_arr.uniform(0.0, 0.08)
+        yearly_amp1[y] = rng_arr.uniform(22, 50)       # 5月振幅: 大幅变化
+        yearly_amp2[y] = rng_arr.uniform(28, 55)       # 8月振幅: 大幅变化
+        yearly_base[y] = rng_arr.uniform(22, 36)       # 基线: 每年不同
+        yearly_noise_std[y] = rng_arr.uniform(1.5, 4.0) # 噪声: 每年不同
+        yearly_trend[y] = rng_arr.uniform(0.0, 0.12)    # 趋势: 每年不同
 
     seasonal_dual = np.zeros(n)
     arr_base = np.zeros(n)
@@ -334,8 +325,8 @@ def _generate_all_data(months):
     arr_trend = np.zeros(n)
     for y in range(5):
         mask = yr_idx == y
-        seasonal_dual[mask] = (peak_may_shape[mask] * yearly_amp1[y] +
-                               peak_aug_shape[mask] * yearly_amp2[y])
+        seasonal_dual[mask] = (peak_may[mask] * yearly_amp1[y] +
+                               peak_aug[mask] * yearly_amp2[y])
         arr_base[mask] = yearly_base[y]
         arr_noise_std[mask] = yearly_noise_std[y]
         arr_trend[mask] = yearly_trend[y] * t[mask]
@@ -762,8 +753,11 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
     residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=8, dropout=0.25)
-    mf_model = train_lstm_model(mf_model, X_r, y_r)
+    mf_hidden = LSTM_MULTI_HIDDEN[material]
+    sf_hidden = LSTM_SINGLE_HIDDEN[material]
+    lstm_ep = LSTM_EPOCHS[material]
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=mf_hidden, dropout=0.25)
+    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=lstm_ep)
 
     mf_model.eval()
     with torch.no_grad():
@@ -781,8 +775,8 @@ def run_vmd_lstm_catboost(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureLSTM(hidden_size=4, dropout=0.25)
-        sf_model = train_lstm_model(sf_model, X_m, y_m)
+        sf_model = SingleFeatureLSTM(hidden_size=sf_hidden, dropout=0.25)
+        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=lstm_ep)
 
         sf_model.eval()
         with torch.no_grad():
@@ -876,8 +870,11 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
     X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
     X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
 
-    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=8, dropout=0.25)
-    mf_model = train_lstm_model(mf_model, X_r, y_r)
+    mf_hidden = LSTM_MULTI_HIDDEN[material]
+    sf_hidden = LSTM_SINGLE_HIDDEN[material]
+    lstm_ep = LSTM_EPOCHS[material]
+    mf_model = MultiFeatureLSTM(input_size=5, hidden_size=mf_hidden, dropout=0.25)
+    mf_model = train_lstm_model(mf_model, X_r, y_r, epochs=lstm_ep)
 
     mf_model.eval()
     with torch.no_grad():
@@ -894,8 +891,8 @@ def run_vmd_lstm_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
         X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
         X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
 
-        sf_model = SingleFeatureLSTM(hidden_size=4, dropout=0.25)
-        sf_model = train_lstm_model(sf_model, X_m, y_m)
+        sf_model = SingleFeatureLSTM(hidden_size=sf_hidden, dropout=0.25)
+        sf_model = train_lstm_model(sf_model, X_m, y_m, epochs=lstm_ep)
 
         sf_model.eval()
         with torch.no_grad():
