@@ -253,7 +253,7 @@ def preprocess_data(df, material):
         n = len(seq)
         lag1 = np.zeros(n); lag1[1:] = seq[:-1]
         lag12 = np.zeros(n); lag12[12:] = seq[:-12]
-        roll3 = np.array([np.mean(seq[max(0,i-2):i+1]) for i in range(n)])
+        roll3 = np.array([np.mean(seq[max(0,i-3):i]) for i in range(n)])  # 仅历史值, 无数据泄露
         return lag1, lag12, roll3
 
     lag1_tr, lag12_tr, roll3_tr = make_lag_rolling(demand_train)
@@ -279,7 +279,7 @@ def preprocess_data(df, material):
         idx = train_len + i
         lag1_te[i] = demand_raw[idx-1] if idx>0 else 0
         lag12_te[i] = demand_raw[idx-12] if idx>=12 else 0
-        roll3_te[i] = np.mean(demand_raw[max(0,idx-2):idx+1])
+        roll3_te[i] = np.mean(demand_raw[max(0,idx-3):idx])  # 仅历史值, 无未来泄露
 
     is_zero_lag1_te = (lag1_te == 0).astype(float)
     is_zero_lag12_te = (lag12_te == 0).astype(float)
