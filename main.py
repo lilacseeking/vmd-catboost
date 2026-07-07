@@ -101,11 +101,9 @@ if sys.platform == 'win32':
 MATERIALS = []  # 动态从 data.xlsx sheet 名加载
 MATERIAL_LABELS = {}
 # 真实市场因子 + 农历日历因子
-FACTOR_NAMES = ['project_count', 'transformer_bids', 'monthly_bid_count',
-                'uhv_bids', 'has_batch', 'digital_bids']
+FACTOR_NAMES = ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
 FACTOR_LABELS = {'project_count': '项目数量(同源)', 'transformer_bids': '输变电批次数',
-                 'monthly_bid_count': '当月公告总数', 'uhv_bids': '特高压批次数',
-                 'has_batch': '是否有批次', 'digital_bids': '数字化批次数'}
+                 'monthly_bid_count': '当月公告总数', 'uhv_bids': '特高压批次数'}
 VMD_K = 5
 VMD_ALPHA = 2000
 VMD_ALPHA_MAP = {'ac_arrester': 4000, 'cvt': 2000, 'post_insulator': 3000}
@@ -1439,6 +1437,54 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
 
 
 # ===================== 批次事件驱动 Conditional CatBoost =====================
+# ===================== Croston-SBA 间歇性需求基线 =====================
+def run_croston_sba(y_train, y_test):
+    """Croston-SBA: 间歇性需求专用预测。Decompose into demand interval + size.
+    SBA变体对Croston偏差做修正: yhat = (1-alpha/2) * size_ema / interval_ema"""
+    d_raw = y_train  # y不再缩放, 直接是原始值
+    alpha = 0.1
+    # 初始化
+    nonzero_idx = np.where(d_raw > 0)[0]
+    if len(nonzero_idx) < 2:
+        return np.full(len(y_test), np.mean(d_raw)), y_test
+    size_ema = d_raw[nonzero_idx[0]]
+    interval_ema = nonzero_idx[0] + 1 if nonzero_idx[0] > 0 else 1
+    last_nz = nonzero_idx[0]
+    size_log, intv_log = [], []
+    for i in range(1, len(nonzero_idx)):
+        interval = nonzero_idx[i] - last_nz
+        demand = d_raw[nonzero_idx[i]]
+        size_ema = alpha * demand + (1-alpha) * size_ema
+        interval_ema = alpha * interval + (1-alpha) * interval_ema
+        last_nz = nonzero_idx[i]
+        size_log.append(size_ema); intv_log.append(interval_ema)
+    if not size_log:
+        return np.full(len(y_test), np.mean(d_raw)), y_test
+    s, iv = size_log[-1], max(intv_log[-1], 1)
+    sba = s / iv * (1 - alpha/2)  # SBA修正
+    preds = np.array([sba if (i % max(1, int(round(iv)))) == 0 else 0 for i in range(len(y_test))])
+    return np.maximum(preds, 0), y_test
+
+
+# ===================== LightGBM 对比模型 =====================
+def run_lightgbm(X_train_factors, y_train, X_test_factors, y_test):
+    """LightGBM: 两阶段=分类×LGBM回归, 对比CatBoost"""
+    try:
+        import lightgbm as lgb
+    except ImportError:
+        return None, y_test
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors,
+        lgb.LGBMRegressor(n_estimators=500, learning_rate=0.03, max_depth=5,
+            num_leaves=31, reg_alpha=1, reg_lambda=3, random_state=RANDOM_SEED, verbose=-1))
+    if yp is None:
+        nv = min(12, len(y_train)//4)
+        reg = lgb.LGBMRegressor(n_estimators=500, learning_rate=0.03, max_depth=5,
+            num_leaves=31, reg_alpha=1, reg_lambda=3, random_state=RANDOM_SEED, verbose=-1)
+        reg.fit(X_train_factors[:-nv], y_train[:-nv], eval_set=[(X_train_factors[-nv:], y_train[-nv:])])
+        yp = np.maximum(reg.predict(X_test_factors), 0)
+    return yp, y_test
+
+
 # ===================== N-HiTS 多尺度层次化预测 (PyTorch原生) =====================
 class NHitsBlock(nn.Module):
     def __init__(self, in_len, out_len, pool_size, hidden_units, dropout=0.2):
@@ -1509,23 +1555,27 @@ def print_metrics_table(all_metrics):
     lines.append("=" * 120)
     lines.append("评估指标汇总表")
     lines.append("=" * 120)
-    header = f"{'物资':<16s} {'模型':<22s} {'MSE':>12s} {'RMSE':>12s} {'MAE':>12s} {'R^2':>12s}"
+    header = f"{'物资':<16s} {'模型':<18s} {'MSE':>10s} {'RMSE':>10s} {'sMAPE':>8s} {'MASE':>8s} {'R2':>8s}"
     lines.append(header)
-    lines.append("-" * 120)
+    lines.append("-" * 130)
 
+    MODEL_ORDER = ['CatBoost', 'NaiveSeasonal', 'Persistence', 'SARIMA', 'Croston-SBA',
+                    'CondCatBoost', 'NHiTS', 'LightGBM', 'TwoStage']
     for material in MATERIALS:
-        for i, model_name in enumerate(['CatBoost', 'NaiveSeasonal', 'Persistence', 'SARIMA', 'CondCatBoost', 'NHiTS', 'TwoStage']):
+        for i, model_name in enumerate(MODEL_ORDER):
             metrics = all_metrics[material].get(model_name, {})
             if metrics:
                 if i == 0:
-                    lines.append(f"{MATERIAL_LABELS[material]:<16s} {model_name:<22s} "
-                                 f"{metrics['MSE']:>12.4f} {metrics['RMSE']:>12.4f} "
-                                 f"{metrics['MAE']:>12.4f} {metrics['R2']:>12.4f}")
+                    lines.append(f"{MATERIAL_LABELS[material]:<16s} {model_name:<18s} "
+                                 f"{metrics['MSE']:>10.2f} {metrics['RMSE']:>10.2f} "
+                                 f"{metrics['sMAPE']:>7.1f}% {metrics['MASE']:>7.3f} "
+                                 f"{metrics['R2']:>7.3f}")
                 else:
-                    lines.append(f"{'':<16s} {model_name:<22s} "
-                                 f"{metrics['MSE']:>12.4f} {metrics['RMSE']:>12.4f} "
-                                 f"{metrics['MAE']:>12.4f} {metrics['R2']:>12.4f}")
-        lines.append("-" * 120)
+                    lines.append(f"{'':<16s} {model_name:<18s} "
+                                 f"{metrics['MSE']:>10.2f} {metrics['RMSE']:>10.2f} "
+                                 f"{metrics['sMAPE']:>7.1f}% {metrics['MASE']:>7.3f} "
+                                 f"{metrics['R2']:>7.3f}")
+        lines.append("-" * 130)
     lines.append("")
 
     for line in lines:
@@ -1633,6 +1683,23 @@ def main():
                              f"MAE={metrics_nh['MAE']:.4f} R2={metrics_nh['R2']:.4f}")
             else:
                 logger.info(f"  [N-HiTS] 跳过 (未安装或失败)")
+
+            # --- Croston-SBA 间歇性需求基线 ---
+            y_pred_cr, y_test_cr = run_croston_sba(y_train, y_test)
+            metrics_cr = evaluate_model(y_test_cr, y_pred_cr)
+            all_results[material]['Croston-SBA'] = {'y_pred': y_pred_cr, 'y_test': y_test_cr, 'metrics': metrics_cr}
+            all_metrics[material]['Croston-SBA'] = metrics_cr
+            logger.info(f"  [基线] Croston-SBA: R2={metrics_cr['R2']:.4f} sMAPE={metrics_cr['sMAPE']:.1f}")
+
+            # --- LightGBM 对比 ---
+            y_pred_lgb, y_test_lgb = run_lightgbm(X_train_factors, y_train, X_test_factors, y_test)
+            if y_pred_lgb is not None:
+                metrics_lgb = evaluate_model(y_test_lgb, y_pred_lgb)
+                all_results[material]['LightGBM'] = {'y_pred': y_pred_lgb, 'y_test': y_test_lgb, 'metrics': metrics_lgb}
+                all_metrics[material]['LightGBM'] = metrics_lgb
+                logger.info(f"  [对比] LightGBM: R2={metrics_lgb['R2']:.4f}")
+            else:
+                logger.info(f"  [LightGBM] lightgbm未安装, 跳过")
 
             # --- 两阶段预测 (Stage1分类 + Stage2回归) ---
             logger.info(f"  [7/8] 两阶段预测...")
