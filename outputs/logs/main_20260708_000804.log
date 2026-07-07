@@ -1,0 +1,189 @@
+00:08:04 | INFO    | ======================================================================
+00:08:04 | INFO    |   配电网物资需求预测 —— VMD-CatBoost 模型对比实验
+00:08:04 | INFO    |   物资: Top5采购频率最高 (从ECP数据自动选择)
+00:08:04 | INFO    |   因子: 批次事件特征 + 项目数量 + 自回归滞后
+00:08:04 | INFO    |   模型: CatBoost / Conditional-CatBoost / N-HiTS / TwoStage + NaiveSeasonal/Persistence/SARIMA
+00:08:04 | INFO    | ======================================================================
+00:08:04 | INFO    |   日志文件: outputs/logs\main_20260708_000804.log
+00:08:04 | INFO    | [1/8] 加载数据...
+00:08:04 | INFO    | 读取已有数据文件: inputs\data.xlsx
+00:08:04 | INFO    |   Sheet[交流避雷器]: 81 条, demand范围=[0.00, 7580.00]
+00:08:04 | INFO    |   Sheet[电容式电压互感器]: 81 条, demand范围=[0.00, 426.00]
+00:08:04 | INFO    |   Sheet[交流支柱绝缘子]: 81 条, demand范围=[0.00, 4888.00]
+00:08:04 | INFO    |   Sheet[断路器保护]: 81 条, demand范围=[0.00, 173.00]
+00:08:04 | INFO    |   Sheet[电抗器保护]: 81 条, demand范围=[0.00, 67.00]
+00:08:04 | INFO    |   物资: ['交流避雷器', '电容式电压互感器', '交流支柱绝缘子', '断路器保护', '电抗器保护']
+00:08:06 | INFO    |   [图表] 需求量曲线 → outputs/figures\需求量曲线.png
+00:08:06 | INFO    | 
+00:08:06 | INFO    | [2/8] 处理 交流避雷器 (交流避雷器)...
+00:08:06 | INFO    |   Top-4 影响因子: ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+00:08:06 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_factors=4 + lag+rolling+month = 13维
+00:08:06 | INFO    |   [数据分割] 训练=69月, 测试=12月
+00:08:06 | DEBUG   |   训练集: 69月, 测试集: 12月
+00:08:06 | INFO    |   [3/8] 模型一: CatBoost...
+00:08:06 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, loss=RMSE
+00:08:07 | INFO    |         MSE=2861611.9863 RMSE=1691.6300 MAE=994.0773 R2=0.3306
+00:08:07 | INFO    |   [Baseline] NaiveSeasonal: R2=0.0963
+00:08:07 | INFO    |   [Baseline] Persistence: R2=-0.4689
+00:08:07 | INFO    |   [Baseline] SARIMA: R2=0.2789
+00:08:07 | INFO    |   [5/8] Conditional-CatBoost...
+00:08:09 | INFO    |         MSE=2890365.9680 RMSE=1700.1076 MAE=1004.3463 R2=0.3239
+00:08:09 | INFO    |   [6/8] N-HiTS...
+00:08:15 | INFO    |   [N-HiTS] samples=33, darts official library
+00:08:15 | INFO    |         MSE=4909085.4062 RMSE=2215.6456 MAE=1326.8738 R2=-0.1483
+00:08:15 | INFO    |   [7/8] 两阶段预测...
+00:08:16 | INFO    |   [两阶段] Stage1分类准确率=100.00%, 非零训练样本=42
+00:08:16 | INFO    |         MSE=2107243.7217 RMSE=1451.6348 MAE=949.3497 R2=0.5071
+00:08:16 | INFO    |   [图表] 特征重要性(交流避雷器) → outputs/figures\特征重要性_交流避雷器.png
+00:08:16 | INFO    | 
+00:08:16 | INFO    | [2/8] 处理 电容式电压互感器 (电容式电压互感器)...
+00:08:16 | INFO    |   Top-4 影响因子: ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+00:08:16 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_factors=4 + lag+rolling+month = 13维
+00:08:16 | INFO    |   [数据分割] 训练=69月, 测试=12月
+00:08:16 | DEBUG   |   训练集: 69月, 测试集: 12月
+00:08:16 | INFO    |   [3/8] 模型一: CatBoost...
+00:08:16 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, loss=RMSE
+00:08:17 | INFO    |         MSE=5499.7922 RMSE=74.1606 MAE=55.7984 R2=0.5109
+00:08:17 | INFO    |   [Baseline] NaiveSeasonal: R2=-1.7481
+00:08:17 | INFO    |   [Baseline] Persistence: R2=-2.4236
+00:08:17 | INFO    |   [Baseline] SARIMA: R2=-0.5009
+00:08:17 | INFO    |   [5/8] Conditional-CatBoost...
+00:08:18 | INFO    |         MSE=7039.2046 RMSE=83.9000 MAE=64.6702 R2=0.3740
+00:08:18 | INFO    |   [6/8] N-HiTS...
+00:08:25 | INFO    |   [N-HiTS] samples=33, darts official library
+00:08:25 | INFO    |         MSE=29243.6030 RMSE=171.0076 MAE=140.5899 R2=-1.6006
+00:08:25 | INFO    |   [7/8] 两阶段预测...
+00:08:27 | INFO    |   [两阶段] Stage1分类准确率=100.00%, 非零训练样本=42
+00:08:27 | INFO    |         MSE=3201.4991 RMSE=56.5818 MAE=42.6289 R2=0.7153
+00:08:27 | INFO    |   [图表] 特征重要性(电容式电压互感器) → outputs/figures\特征重要性_电容式电压互感器.png
+00:08:27 | INFO    | 
+00:08:27 | INFO    | [2/8] 处理 交流支柱绝缘子 (交流支柱绝缘子)...
+00:08:27 | INFO    |   Top-4 影响因子: ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+00:08:27 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_factors=4 + lag+rolling+month = 13维
+00:08:27 | INFO    |   [数据分割] 训练=69月, 测试=12月
+00:08:27 | DEBUG   |   训练集: 69月, 测试集: 12月
+00:08:27 | INFO    |   [3/8] 模型一: CatBoost...
+00:08:27 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, loss=RMSE
+00:08:28 | INFO    |         MSE=620332.8862 RMSE=787.6121 MAE=648.1629 R2=0.5296
+00:08:28 | INFO    |   [Baseline] NaiveSeasonal: R2=-1.2457
+00:08:28 | INFO    |   [Baseline] Persistence: R2=-0.4130
+00:08:28 | INFO    |   [Baseline] SARIMA: R2=-0.3865
+00:08:28 | INFO    |   [5/8] Conditional-CatBoost...
+00:08:30 | INFO    |         MSE=763479.2904 RMSE=873.7730 MAE=690.8569 R2=0.4210
+00:08:30 | INFO    |   [6/8] N-HiTS...
+00:08:36 | INFO    |   [N-HiTS] samples=33, darts official library
+00:08:36 | INFO    |         MSE=1658938.7230 RMSE=1287.9980 MAE=1089.6591 R2=-0.2580
+00:08:36 | INFO    |   [7/8] 两阶段预测...
+00:08:37 | INFO    |   [两阶段] Stage1分类准确率=100.00%, 非零训练样本=42
+00:08:37 | INFO    |         MSE=321895.0525 RMSE=567.3580 MAE=370.6897 R2=0.7559
+00:08:38 | INFO    |   [图表] 特征重要性(交流支柱绝缘子) → outputs/figures\特征重要性_交流支柱绝缘子.png
+00:08:38 | INFO    | 
+00:08:38 | INFO    | [2/8] 处理 断路器保护 (断路器保护)...
+00:08:38 | INFO    |   Top-4 影响因子: ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+00:08:38 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_factors=4 + lag+rolling+month = 13维
+00:08:38 | INFO    |   [数据分割] 训练=69月, 测试=12月
+00:08:38 | DEBUG   |   训练集: 69月, 测试集: 12月
+00:08:38 | INFO    |   [3/8] 模型一: CatBoost...
+00:08:38 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, loss=RMSE
+00:08:38 | INFO    |         MSE=208.2062 RMSE=14.4294 MAE=10.0258 R2=0.6214
+00:08:38 | INFO    |   [Baseline] NaiveSeasonal: R2=-0.5356
+00:08:38 | INFO    |   [Baseline] Persistence: R2=-4.2483
+00:08:38 | INFO    |   [Baseline] SARIMA: R2=-0.5684
+00:08:38 | INFO    |   [5/8] Conditional-CatBoost...
+00:08:39 | INFO    |         MSE=238.9650 RMSE=15.4585 MAE=10.5875 R2=0.5654
+00:08:39 | INFO    |   [6/8] N-HiTS...
+00:09:04 | INFO    |   [N-HiTS] samples=33, darts official library
+00:09:04 | INFO    |         MSE=706.4046 RMSE=26.5783 MAE=15.1027 R2=-0.2846
+00:09:04 | INFO    |   [7/8] 两阶段预测...
+00:09:05 | INFO    |   [两阶段] Stage1分类准确率=100.00%, 非零训练样本=41
+00:09:05 | INFO    |         MSE=454.8227 RMSE=21.3266 MAE=15.4702 R2=0.1729
+00:09:05 | INFO    |   [图表] 特征重要性(断路器保护) → outputs/figures\特征重要性_断路器保护.png
+00:09:05 | INFO    | 
+00:09:05 | INFO    | [2/8] 处理 电抗器保护 (电抗器保护)...
+00:09:05 | INFO    |   Top-4 影响因子: ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+00:09:05 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_factors=4 + lag+rolling+month = 13维
+00:09:05 | INFO    |   [数据分割] 训练=69月, 测试=12月
+00:09:05 | DEBUG   |   训练集: 69月, 测试集: 12月
+00:09:05 | INFO    |   [3/8] 模型一: CatBoost...
+00:09:05 | INFO    |   [CatBoost基线] iterations=1500, lr=0.02, depth=6, l2=3, loss=RMSE
+00:09:06 | INFO    |         MSE=14.2224 RMSE=3.7713 MAE=2.9269 R2=0.7958
+00:09:06 | INFO    |   [Baseline] NaiveSeasonal: R2=-2.5457
+00:09:06 | INFO    |   [Baseline] Persistence: R2=-0.0483
+00:09:06 | INFO    |   [Baseline] SARIMA: R2=-3.2378
+00:09:06 | INFO    |   [5/8] Conditional-CatBoost...
+00:09:08 | INFO    |         MSE=16.0360 RMSE=4.0045 MAE=3.2845 R2=0.7697
+00:09:08 | INFO    |   [6/8] N-HiTS...
+00:09:29 | INFO    |   [N-HiTS] samples=33, darts official library
+00:09:29 | INFO    |         MSE=144.4888 RMSE=12.0203 MAE=9.4961 R2=-1.0748
+00:09:29 | INFO    |   [7/8] 两阶段预测...
+00:09:31 | INFO    |   [两阶段] Stage1分类准确率=100.00%, 非零训练样本=41
+00:09:31 | INFO    |         MSE=22.4157 RMSE=4.7345 MAE=3.1043 R2=0.6781
+00:09:32 | INFO    |   [图表] 特征重要性(电抗器保护) → outputs/figures\特征重要性_电抗器保护.png
+00:09:32 | INFO    | 
+00:09:32 | INFO    | [8/8] 汇总评估与可视化...
+00:09:32 | INFO    | 
+00:09:32 | INFO    | ========================================================================================================================
+00:09:32 | INFO    | 评估指标汇总表
+00:09:32 | INFO    | ========================================================================================================================
+00:09:32 | INFO    | 物资               模型                              MSE         RMSE          MAE          R^2
+00:09:32 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:09:32 | INFO    | 交流避雷器            CatBoost               2861611.9863    1691.6300     994.0773       0.3306
+00:09:32 | INFO    |                  NaiveSeasonal          3863131.4167    1965.4850    1331.0833       0.0963
+00:09:32 | INFO    |                  Persistence            6279299.5833    2505.8531    1428.4167      -0.4689
+00:09:32 | INFO    |                  SARIMA                 3082744.5901    1755.7746    1356.8945       0.2789
+00:09:32 | INFO    |                  CondCatBoost           2890365.9680    1700.1076    1004.3463       0.3239
+00:09:32 | INFO    |                  NHiTS                  4909085.4062    2215.6456    1326.8738      -0.1483
+00:09:32 | INFO    |                  TwoStage               2107243.7217    1451.6348     949.3497       0.5071
+00:09:32 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:09:32 | INFO    | 电容式电压互感器         CatBoost                  5499.7922      74.1606      55.7984       0.5109
+00:09:32 | INFO    |                  NaiveSeasonal            30901.1667     175.7873     145.5000      -1.7481
+00:09:32 | INFO    |                  Persistence              38497.2500     196.2072     169.0833      -2.4236
+00:09:32 | INFO    |                  SARIMA                   16876.7410     129.9105     108.6409      -0.5009
+00:09:32 | INFO    |                  CondCatBoost              7039.2046      83.9000      64.6702       0.3740
+00:09:32 | INFO    |                  NHiTS                    29243.6030     171.0076     140.5899      -1.6006
+00:09:32 | INFO    |                  TwoStage                  3201.4991      56.5818      42.6289       0.7153
+00:09:32 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:09:32 | INFO    | 交流支柱绝缘子          CatBoost                620332.8862     787.6121     648.1629       0.5296
+00:09:32 | INFO    |                  NaiveSeasonal          2961393.5000    1720.8700    1333.1667      -1.2457
+00:09:32 | INFO    |                  Persistence            1863355.5000    1365.0478    1111.5000      -0.4130
+00:09:32 | INFO    |                  SARIMA                 1828420.3830    1352.1910    1126.2580      -0.3865
+00:09:32 | INFO    |                  CondCatBoost            763479.2904     873.7730     690.8569       0.4210
+00:09:32 | INFO    |                  NHiTS                  1658938.7230    1287.9980    1089.6591      -0.2580
+00:09:32 | INFO    |                  TwoStage                321895.0525     567.3580     370.6897       0.7559
+00:09:32 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:09:32 | INFO    | 断路器保护            CatBoost                   208.2062      14.4294      10.0258       0.6214
+00:09:32 | INFO    |                  NaiveSeasonal              844.4167      29.0588      20.2500      -0.5356
+00:09:32 | INFO    |                  Persistence               2886.0000      53.7215      51.3333      -4.2483
+00:09:32 | INFO    |                  SARIMA                     862.4667      29.3678      27.5372      -0.5684
+00:09:32 | INFO    |                  CondCatBoost               238.9650      15.4585      10.5875       0.5654
+00:09:32 | INFO    |                  NHiTS                      706.4046      26.5783      15.1027      -0.2846
+00:09:32 | INFO    |                  TwoStage                   454.8227      21.3266      15.4702       0.1729
+00:09:32 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:09:32 | INFO    | 电抗器保护            CatBoost                    14.2224       3.7713       2.9269       0.7958
+00:09:32 | INFO    |                  NaiveSeasonal              246.9167      15.7136      13.0833      -2.5457
+00:09:32 | INFO    |                  Persistence                 73.0000       8.5440       6.8333      -0.0483
+00:09:32 | INFO    |                  SARIMA                     295.1140      17.1789      15.0759      -3.2378
+00:09:32 | INFO    |                  CondCatBoost                16.0360       4.0045       3.2845       0.7697
+00:09:32 | INFO    |                  NHiTS                      144.4888      12.0203       9.4961      -1.0748
+00:09:32 | INFO    |                  TwoStage                    22.4157       4.7345       3.1043       0.6781
+00:09:32 | INFO    | ------------------------------------------------------------------------------------------------------------------------
+00:09:32 | INFO    | 
+00:09:32 | INFO    |   [图表] 预测对比图(交流避雷器) → outputs/figures\预测对比_交流避雷器.png
+00:09:33 | INFO    |   [图表] 预测对比图(电容式电压互感器) → outputs/figures\预测对比_电容式电压互感器.png
+00:09:34 | INFO    |   [图表] 预测对比图(交流支柱绝缘子) → outputs/figures\预测对比_交流支柱绝缘子.png
+00:09:34 | INFO    |   [图表] 预测对比图(断路器保护) → outputs/figures\预测对比_断路器保护.png
+00:09:35 | INFO    |   [图表] 预测对比图(电抗器保护) → outputs/figures\预测对比_电抗器保护.png
+00:09:38 | INFO    |   [图表] 指标对比图 → outputs/figures\指标对比图.png
+00:09:38 | INFO    | 
+00:09:38 | INFO    | ======================================================================
+00:09:38 | INFO    |   模型性能排序 (按R^2)
+00:09:38 | INFO    | ======================================================================
+00:09:38 | INFO    |   交流避雷器: [1st] TwoStage (R^2=0.5071)  [2nd] CatBoost (R^2=0.3306)  [3rd] CondCatBoost (R^2=0.3239)
+00:09:38 | INFO    |   电容式电压互感器: [1st] TwoStage (R^2=0.7153)  [2nd] CatBoost (R^2=0.5109)  [3rd] CondCatBoost (R^2=0.3740)
+00:09:38 | INFO    |   交流支柱绝缘子: [1st] TwoStage (R^2=0.7559)  [2nd] CatBoost (R^2=0.5296)  [3rd] CondCatBoost (R^2=0.4210)
+00:09:38 | INFO    |   断路器保护: [1st] CatBoost (R^2=0.6214)  [2nd] CondCatBoost (R^2=0.5654)  [3rd] TwoStage (R^2=0.1729)
+00:09:38 | INFO    |   电抗器保护: [1st] CatBoost (R^2=0.7958)  [2nd] CondCatBoost (R^2=0.7697)  [3rd] TwoStage (R^2=0.6781)
+00:09:38 | INFO    | 
+00:09:38 | INFO    | 所有图表已保存至: C:\Users\董文涛\PycharmProjects\vmd-catboost\outputs\figures/
+00:09:38 | INFO    | 日志文件: C:\Users\董文涛\PycharmProjects\vmd-catboost\outputs\logs\main_20260708_000804.log
+00:09:38 | INFO    | 完成!

@@ -1,5 +1,6 @@
 vmdpy>=0.2.0
 torch>=2.5.0
+darts>=0.30.0
 catboost>=1.2.7
 pandas>=2.2.0
 numpy>=1.26.0
