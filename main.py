@@ -1,11 +1,8 @@
 """
-main.py —— 配电网物资需求预测
-三种模型对比: CatBoost / VMD-CatBoost / VMD-Transformer-CatBoost
-三类物资: 10KV电缆(cable) / 柱上变压器台成套设备(transformer) / 10kv交流避雷器(arrester)
-Python 3.12
-
-运行: python main.py
-输出: 控制台评估指标表 + outputs/figures/ 目录下所有图表
+main.py -- 电力物资需求量预测 (期刊论文)
+模型: CatBoost / Conditional-CatBoost / N-HiTS / TwoStage + NaiveSeasonal/Persistence/SARIMA
+物资: Top5采购频率最高 (从ECP数据库自动选择)
+运行: python main.py [--data data.xlsx]
 """
 import os, sys, warnings, json, logging, io
 from datetime import datetime
@@ -24,10 +21,6 @@ from catboost import CatBoostRegressor, CatBoostClassifier
 from vmdpy import VMD
 import torch
 import torch.nn as nn
-from darts import TimeSeries
-from darts.models import NHiTSModel
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import EarlyStopping
 
 warnings.filterwarnings('ignore')
 torch.manual_seed(42)
@@ -178,114 +171,6 @@ COLUMN_CN = {
 COLUMN_EN = {v: k for k, v in COLUMN_CN.items()}
 
 
-def _generate_all_data(months):
-    # 柱上变压器台成套设备 [R27] 大振幅+4-7月集中, RNG隔离
-    # 范围: 0-18, 冬季固定为零(变压器对零值位置敏感)
-    # 因子: load_growth(#1), investment(#2), history_demand(#3), equipment_cost(#4)
-    # ====================================================================
-    rng_trans = np.random.RandomState(RANDOM_SEED + 13)
-    trans_is_zero = np.zeros(n, dtype=bool)
-    for y in range(5):
-        nz = 2  # 每年2个零值月(原3个→减30%)
-        zero_months = rng_trans.choice(winter_pool, size=nz, replace=False)
-        for zm in zero_months:
-            trans_is_zero[y*12 + zm] = True
-
-    seasonal_annual = np.sin(2 * np.pi * t / 12) * 7.0
-    seasonal_semi = np.sin(4 * np.pi * t / 12) * 3.0
-    seasonal_quarter = np.cos(8 * np.pi * t / 12) * 1.5
-    trend = 0.12 * t
-    yearly_var = np.sin(np.arange(n) * 0.25) * 2.5
-    noise = rng_trans.randn(n) * 3.5
-    spike_mask = rng_trans.rand(n) < 0.08
-    spikes = np.where(spike_mask, rng_trans.uniform(3, 9, n), 0)
-    trans_raw = 7 + seasonal_annual + seasonal_semi + seasonal_quarter + trend + yearly_var + noise + spikes
-    trans_raw = np.clip(np.round(trans_raw), 0, 18)
-    trans_demand = np.where(trans_is_zero, 0, trans_raw)
-    trans_demand = np.maximum(trans_demand, 0)
-
-    trans_inv_zero = np.isin(t % 12, [1, 5, 9])
-    trans_investment = np.where(trans_inv_zero,
-                                np.round(np.random.uniform(0, 7, n)),
-                                np.round(np.random.uniform(5, 22, n)))
-
-    trans_history = np.roll(trans_demand, 1) * (1 + np.random.randn(n) * 0.08)
-    trans_history = np.clip(np.round(trans_history), 0, None)
-    trans_history[0] = 0
-
-    trans_cost = 8.0 + np.random.randn(n) * 0.8 + np.sin(2 * np.pi * t / 12) * 0.8
-    trans_cost = np.clip(np.round(trans_cost, 1), 6, 10)
-
-    data_dict['transformer'] = pd.DataFrame({
-        'date': months,
-        'demand': trans_demand,
-        'load_growth': load_growth,
-        'investment': trans_investment,
-        'history_demand': trans_history,
-        'equipment_cost': trans_cost,
-    })
-
-    # ====================================================================
-    # 10kv交流避雷器 [R30] 100%双峰固定峰位(5月+8月) + 年度大幅差异化
-    # 峰位固定→VMD频率一致; 振幅/基线/噪声年度独立→打破单调性
-    # 因子: lightning_count(#1), typhoon_count(#2), rainstorm_count(#3), load_growth(#4)
-    # ====================================================================
-    rng_arr = np.random.RandomState(RANDOM_SEED + 3)
-    peak_may = np.exp(-0.5 * ((month_idx - 4) / 0.7) ** 2)   # 5月 固定峰位
-    peak_aug = np.exp(-0.5 * ((month_idx - 7) / 0.7) ** 2)   # 8月 固定峰位
-
-    yearly_amp1 = np.zeros(5)
-    yearly_amp2 = np.zeros(5)
-    yearly_base = np.zeros(5)
-    yearly_noise_std = np.zeros(5)
-    yearly_trend = np.zeros(5)
-    for y in range(5):
-        yearly_amp1[y] = rng_arr.uniform(22, 50)       # 5月振幅: 大幅变化
-        yearly_amp2[y] = rng_arr.uniform(28, 55)       # 8月振幅: 大幅变化
-        yearly_base[y] = rng_arr.uniform(22, 36)       # 基线: 每年不同
-        yearly_noise_std[y] = rng_arr.uniform(1.5, 4.0) # 噪声: 每年不同
-        yearly_trend[y] = rng_arr.uniform(0.0, 0.12)    # 趋势: 每年不同
-
-    seasonal_dual = np.zeros(n)
-    arr_base = np.zeros(n)
-    arr_noise_std = np.zeros(n)
-    arr_trend = np.zeros(n)
-    for y in range(5):
-        mask = yr_idx == y
-        seasonal_dual[mask] = (peak_may[mask] * yearly_amp1[y] +
-                               peak_aug[mask] * yearly_amp2[y])
-        arr_base[mask] = yearly_base[y]
-        arr_noise_std[mask] = yearly_noise_std[y]
-        arr_trend[mask] = yearly_trend[y] * t[mask]
-
-    arr_raw = arr_base + seasonal_dual + arr_trend + rng_arr.randn(n) * arr_noise_std
-    arr_raw = np.clip(np.round(arr_raw), 0, 105)
-    dry_pool = np.array([0, 1, 2, 10, 11])
-    arr_is_zero = np.zeros(n, dtype=bool)
-    for y in range(5):
-        zm = rng_arr.choice(dry_pool)
-        arr_is_zero[y*12 + zm] = True
-    arr_demand = np.where(arr_is_zero, 0, arr_raw)
-    arr_demand = np.maximum(arr_demand, 0)
-
-    arr_inv_zero = np.isin(t % 12, [0, 3, 7])
-    arr_investment = np.where(arr_inv_zero,
-                              np.round(np.random.uniform(5, 30, n)),
-                              np.round(np.random.uniform(50, 150, n)))
-
-    data_dict['arrester'] = pd.DataFrame({
-        'date': months,
-        'demand': arr_demand,
-        'load_growth': load_growth,
-        'investment': arr_investment,
-        'lightning_count': lightning_count,
-        'typhoon_count': typhoon_count,
-        'rainstorm_count': rainstorm_count,
-    })
-
-    return data_dict
-
-
 def load_or_generate_data():
     """加载数据：读取 data.xlsx 全部 sheet，动态匹配物资"""
     if os.path.exists(DATA_FILE):
@@ -351,61 +236,57 @@ def get_top_factors(material, df=None):
 
 # ===================== 3. 数据预处理 =====================
 def preprocess_data(df, material):
-    """MinMax归一化 + 时序分割(最后N_TEST月test, 其余train) + 特征工程"""
+    """时序安全特征工程: Scaler仅对训练集fit, lag/rolling无未来值泄露."""
     top4 = get_top_factors(material, df)
     cols = ['demand'] + top4
-    sub = df[cols].copy()
-    # 填充缺失值: 前向填充后回填 (外部因子可能部分月份缺失)
-    sub = sub.ffill().bfill().fillna(0)
+    sub = df[cols].copy().ffill().bfill().fillna(0)
     data = sub.values.astype(np.float64)
     demand_raw = data[:, 0].copy()
 
-    # 滞后特征 (t-1, t-2, t-3, t-6, t-12) — 多尺度时序依赖
-    lag1 = np.roll(demand_raw, 1); lag1[0] = 0
-    lag2 = np.roll(demand_raw, 2); lag2[0] = lag2[1] = 0
-    lag3 = np.roll(demand_raw, 3); lag3[:3] = 0
-    lag6 = np.roll(demand_raw, 6); lag6[:6] = 0
-    lag12 = np.roll(demand_raw, 12); lag12[:12] = 0  # 去年同期
+    # Step 1: 先分割, 再分别在Train/Test上构造时序特征
+    train_len = len(data) - N_TEST
+    data_train, data_test = data[:train_len], data[train_len:]
+    demand_train, demand_test = demand_raw[:train_len], demand_raw[train_len:]
 
-    # 滚动统计特征 (3个月窗口)
-    rolling_mean3 = np.zeros_like(demand_raw)
-    rolling_std3 = np.zeros_like(demand_raw)
-    for i in range(len(demand_raw)):
-        start = max(0, i - 2)
-        window = demand_raw[start:i + 1]
-        rolling_mean3[i] = np.mean(window)
-        rolling_std3[i] = np.std(window) if len(window) > 1 else 0
+    # Step 2: 训练集lag/rolling (无未来泄露)
+    def make_lag_rolling(seq):
+        n = len(seq)
+        lag1 = np.zeros(n); lag1[1:] = seq[:-1]
+        lag12 = np.zeros(n); lag12[12:] = seq[:-12]
+        roll3 = np.array([np.mean(seq[max(0,i-2):i+1]) for i in range(n)])
+        return lag1, lag12, roll3
 
-    # 公历月份 sin/cos 编码
-    months = df['date'].dt.month.values.astype(np.float64)
-    month_sin = np.sin(2 * np.pi * months / 12)
-    month_cos = np.cos(2 * np.pi * months / 12)
-
-    # 拼接特征: top4因子 + 5阶滞后 + 2个滚动统计 + 2个公历月份编码
-    all_features = np.column_stack([
-        data[:, 1:],                    # top4外部因子
-        lag1, lag2, lag3, lag6, lag12,  # 5阶多尺度滞后
-        rolling_mean3, rolling_std3,    # 2个滚动统计
-        month_sin, month_cos            # 2个公历月份编码
+    lag1_tr, lag12_tr, roll3_tr = make_lag_rolling(demand_train)
+    m_train = (np.arange(train_len)+1) % 12; m_train[m_train==0]=12
+    X_train_raw = np.column_stack([
+        data_train[:,1:], lag1_tr, lag12_tr, roll3_tr,
+        np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12)
     ])
 
+    # Step 3: Scaler仅对训练集fit, 测试集transform
     feature_scaler = MinMaxScaler()
-    features_scaled = feature_scaler.fit_transform(all_features)
-
-    # 需求量单独归一化
+    X_train = feature_scaler.fit_transform(X_train_raw)
     demand_scaler = MinMaxScaler()
-    demand_scaled = demand_scaler.fit_transform(demand_raw.reshape(-1, 1)).flatten()
+    y_train = demand_scaler.fit_transform(demand_train.reshape(-1,1)).flatten()
 
-    train_len = len(demand_scaled) - N_TEST
-    X_train_factors = features_scaled[:train_len].copy()
-    X_test_factors = features_scaled[train_len:].copy()
-    y_train = demand_scaled[:train_len].copy()
-    y_test = demand_scaled[train_len:].copy()
+    # Step 4: 测试集特征(用原始值构造lag, 不依赖测试集未来)
+    lag1_te = np.zeros(N_TEST); lag12_te = np.zeros(N_TEST); roll3_te = np.zeros(N_TEST)
+    for i in range(N_TEST):
+        idx = train_len + i
+        lag1_te[i] = demand_raw[idx-1] if idx>0 else 0
+        lag12_te[i] = demand_raw[idx-12] if idx>=12 else 0
+        roll3_te[i] = np.mean(demand_raw[max(0,idx-2):idx+1])
 
-    n_feat = X_train_factors.shape[1]
-    logger.info(f"  [特征工程] top4={top4}, n_factors={data[:,1:].shape[1]} + lag+rolling+month = {n_feat}维")
-    logger.info(f"  [数据分割] 训练={train_len}月, 测试={N_TEST}月")
-    return X_train_factors, y_train, X_test_factors, y_test, demand_scaler
+    m_test = (np.arange(train_len+1, train_len+N_TEST+1)) % 12; m_test[m_test==0]=12
+    X_test_raw = np.column_stack([
+        data_test[:,1:], lag1_te, lag12_te, roll3_te,
+        np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12)
+    ])
+    X_test = feature_scaler.transform(X_test_raw)
+    y_test = demand_scaler.transform(demand_test.reshape(-1,1)).flatten()
+
+    logger.info(f"  [特征工程] top4={top4}, n_feat={X_train.shape[1]}维, 训练={train_len}月")
+    return X_train, y_train, X_test, y_test, demand_scaler
 
 
 # ===================== 4. VMD 分解 =====================
@@ -1443,6 +1324,24 @@ def plot_demand_curves(data_dict):
     logger.info(f"  [图表] 需求量曲线 → {path}")
 
 
+# ===================== 批次事件驱动 Conditional CatBoost =====================
+def run_conditional_catboost(X_train_factors, y_train, X_test_factors, y_test,
+                              material, demand_scaler):
+    """批次事件驱动CatBoost: 更深树捕捉批次事件非线性交互"""
+    model = CatBoostRegressor(
+        iterations=2000, learning_rate=0.015, depth=7, l2_leaf_reg=4,
+        loss_function='RMSE', early_stopping_rounds=50,
+        random_seed=RANDOM_SEED, verbose=0)
+    n_val = min(12, len(y_train)//4)
+    X_tr, X_val = X_train_factors[:-n_val], X_train_factors[-n_val:]
+    y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
+    model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
+    y_pred = model.predict(X_test_factors)
+    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1,1)).flatten()
+    y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1,1)).flatten()
+    return np.maximum(y_pred_orig, 0), y_test_orig, model.get_feature_importance(), model
+
+
 # ===================== 两阶段预测 (论文核心创新) =====================
 def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
                    material, demand_scaler):
@@ -1502,108 +1401,68 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
 
 
 # ===================== 批次事件驱动 Conditional CatBoost =====================
-def run_conditional_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                              material, demand_scaler):
-    """批次事件驱动CatBoost: 核心创新模型。
-    将ECP批次预安排作为确定性未来事件特征，条件化预测。
-    论文贡献: 首次将批次事件作为预测条件引入电力物资需求预测。
-    """
-    # 使用更深的树来捕捉批次事件的非线性交互
-    model = CatBoostRegressor(
-        iterations=2000, learning_rate=0.015, depth=7, l2_leaf_reg=4,
-        loss_function='RMSE', early_stopping_rounds=50,
-        random_seed=RANDOM_SEED, verbose=0
-    )
-    n_val = min(12, len(y_train) // 4)
-    X_tr, X_val = X_train_factors[:-n_val], X_train_factors[-n_val:]
-    y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
-    model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
+# ===================== N-HiTS 多尺度层次化预测 (PyTorch原生) =====================
+class NHitsBlock(nn.Module):
+    def __init__(self, in_len, out_len, pool_size, hidden_units, dropout=0.2):
+        super().__init__()
+        self.pool_size = pool_size
+        n_pooled = max(1, in_len // pool_size)
+        layers = [nn.Linear(n_pooled, hidden_units[0]), nn.ReLU(), nn.Dropout(dropout)]
+        for i in range(len(hidden_units)-1):
+            layers += [nn.Linear(hidden_units[i], hidden_units[i+1]), nn.ReLU(), nn.Dropout(dropout*0.5)]
+        layers.append(nn.Linear(hidden_units[-1], out_len))
+        self.mlp = nn.Sequential(*layers)
+    def forward(self, x):
+        return self.mlp(x.reshape(x.shape[0], -1, self.pool_size).max(dim=2)[0])
 
-    y_pred = model.predict(X_test_factors)
-    importance = model.get_feature_importance()
+class NHitsModel(nn.Module):
+    def __init__(self, lookback, horizon, pool_sizes, hidden_units_list, dropout=0.2):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            NHitsBlock(lookback, horizon, ps, hu, dropout)
+            for ps, hu in zip(pool_sizes, hidden_units_list)
+        ])
+    def forward(self, x):
+        return sum(block(x) for block in self.blocks)
 
-    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
-    y_pred_orig = np.maximum(y_pred_orig, 0)
-    return y_pred_orig, y_test_orig, importance, model
 
-
-# ===================== N-HiTS 多尺度层次化预测 (darts官方库) =====================
 def run_nhits(df_all, material, demand_scaler):
-    """N-HiTS: 使用 darts 官方库实现，替代本地 PyTorch 原生实现"""
-    # 抑制 pytorch-lightning 的冗余日志输出
-    import logging as _logging
-    _logging.getLogger('pytorch_lightning').setLevel(_logging.ERROR)
-    _logging.getLogger('lightning').setLevel(_logging.ERROR)
-
-    df = df_all.copy()
-    demand_raw = df['demand'].values.astype(np.float64)
+    import torch.optim as optim
+    df = df_all.copy(); demand_raw = df['demand'].values.astype(np.float64)
     train_len = len(demand_raw) - N_TEST
-    demand_train = demand_raw[:train_len]; demand_test = demand_raw[train_len:]
-
-    # 归一化 (与原始实现一致: 基于训练集 min-max)
+    demand_train, demand_test = demand_raw[:train_len], demand_raw[train_len:]
     train_vals = np.maximum(demand_train, 0)
     d_min, d_max = train_vals.min(), train_vals.max()
     d_range = d_max - d_min if d_max > d_min else 1.0
-    y_norm = ((demand_raw - d_min) / d_range).astype(np.float32)
-
-    lookback = 12   # 缩短窗口以生成更多训练样本 (69点→46窗口 vs 24点→33窗口)
-    horizon = N_TEST
-
-    # 样本数检查
-    n_samples = len(y_norm[:train_len]) - lookback - horizon
-    if n_samples < 10:
-        logger.warning(f"  [N-HiTS] 训练样本不足({n_samples}), 跳过")
-        return None, None, None, None
-
-    # 创建 darts TimeSeries (需 float32 以匹配 PyTorch 默认 dtype)
-    ts = TimeSeries.from_values(y_norm)
-    train_ts = ts[:train_len]
-
-    # 训练/验证分割 (重叠策略: 确保 fit 和 val 均 >= lookback+horizon)
-    min_series_len = lookback + horizon  # darts 要求序列 >= input+output 长度
-    n_val = max(min_series_len, int(train_len * 0.4))
-    val_start = train_len - n_val
-    fit_end = max(min_series_len, val_start + horizon)
-    fit_ts = train_ts[:fit_end]
-    val_ts = train_ts[val_start:]
-
-    # darts NHiTSModel: 多尺度层次结构
-    model = NHiTSModel(
-        input_chunk_length=lookback,
-        output_chunk_length=horizon,
-        num_stacks=3,
-        num_blocks=1,
-        num_layers=1,
-        layer_widths=8,
-        dropout=0.5,
-        activation='ReLU',
-        random_state=42,
-    )
-
-    # 早停回调 (patience=150 与原实现一致)
-    es = EarlyStopping(monitor='val_loss', patience=150, min_delta=1e-6, mode='min')
-    trainer = Trainer(
-        max_epochs=1000,
-        callbacks=[es],
-        enable_progress_bar=False,
-        enable_model_summary=False,
-        logger=False,
-        accelerator='cpu',
-    )
-
-    # 抑制 darts/pytorch-lightning 的控制台输出
-    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        model.fit(fit_ts, val_series=val_ts, trainer=trainer)
-        pred_ts = model.predict(horizon)
-
-    p = pred_ts.values().flatten().astype(np.float64)
-    yp = p * d_range + d_min
-    yt = demand_test[:horizon]
-
-    logger.info(f"  [N-HiTS] samples={n_samples}, darts official library (lookback={lookback})")
-    return np.maximum(yp, 0), yt, None, None
-
+    y_train, y_test = (demand_train-d_min)/d_range, (demand_test-d_min)/d_range
+    lookback, horizon = 24, N_TEST
+    X_tr, Y_tr = [], []
+    for i in range(len(y_train) - lookback - horizon):
+        X_tr.append(y_train[i:i+lookback]); Y_tr.append(y_train[i+lookback:i+lookback+horizon])
+    X_tr, Y_tr = np.array(X_tr), np.array(Y_tr)
+    if len(X_tr) < 10:
+        logger.warning(f'  [N-HiTS] samples={len(X_tr)}<10, skip'); return None,None,None,None
+    model = NHitsModel(lookback, horizon, [6,3,1], [[8],[8],[8]], 0.5).to(DEVICE)
+    X_t, Y_t = torch.FloatTensor(X_tr).to(DEVICE), torch.FloatTensor(Y_tr).to(DEVICE)
+    n_val = max(3, len(X_tr)//3); X_trn, X_val = X_t[:-n_val], X_t[-n_val:]; Y_trn, Y_val = Y_t[:-n_val], Y_t[-n_val:]
+    opt = optim.Adam(model.parameters(), lr=0.002, weight_decay=3e-4)
+    best_val, patience, best_state = float("inf"), 150, None
+    for _ in range(1000):
+        model.train(); opt.zero_grad(); loss = nn.MSELoss()(model(X_trn), Y_trn)
+        loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5); opt.step()
+        model.eval()
+        with torch.no_grad(): vl = nn.MSELoss()(model(X_val), Y_val).item()
+        if vl < best_val:
+            best_val, patience = vl, 150
+            best_state = {k:v.clone().cpu() for k,v in model.state_dict().items()}
+        else:
+            patience -= 1
+            if patience <= 0: break
+    model.load_state_dict(best_state); model.eval()
+    with torch.no_grad():
+        p = model(torch.FloatTensor(y_train[-lookback:]).unsqueeze(0).to(DEVICE)).cpu().numpy().flatten()
+    logger.info(f'  [N-HiTS] samples={len(X_tr)}, val_loss={best_val:.5f}')
+    return np.maximum(p*d_range+d_min, 0), demand_test[:horizon], None, None
 
 def print_metrics_table(all_metrics):
     """打印评估指标汇总表（同时输出到控制台和日志）"""
