@@ -1339,6 +1339,144 @@ def plot_demand_curves(data_dict):
     logger.info(f"  [图表] 需求量曲线 → {path}")
 
 
+# ===================== DLinear (AAAI 2023) — 极简时序预测 =====================
+class DLinearModel(nn.Module):
+    """DLinear: 趋势+季节分解 → 各自一个线性层 → 相加。30行PyTorch."""
+    def __init__(self, lookback, horizon, kernel_size=7):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.linear_trend = nn.Linear(lookback, horizon)
+        self.linear_seasonal = nn.Linear(lookback, horizon)
+    def forward(self, x):
+        # Moving avg for trend
+        avg = nn.functional.avg_pool1d(x.unsqueeze(1), self.kernel_size, 1,
+            padding=self.kernel_size//2).squeeze(1)
+        trend = self.linear_trend(avg)
+        seasonal = self.linear_seasonal(x - avg)
+        return trend + seasonal
+
+def run_dlinear(y_train, y_test, lookback=24):
+    """DLinear: 极简线性模型(论文中击败复杂Transformer的基线)"""
+    import torch.optim as optim
+    horizon = len(y_test)
+    X_tr, Y_tr = [], []
+    for i in range(len(y_train) - lookback - horizon):
+        X_tr.append(y_train[i:i+lookback]); Y_tr.append(y_train[i+lookback:i+lookback+horizon])
+    if len(X_tr) < 10:
+        return np.full(horizon, np.mean(y_train)), y_test
+    X_tr=np.array(X_tr); Y_tr=np.array(Y_tr)
+    model = DLinearModel(lookback, horizon).to(DEVICE)
+    X_t=torch.FloatTensor(X_tr).to(DEVICE); Y_t=torch.FloatTensor(Y_tr).to(DEVICE)
+    opt=optim.Adam(model.parameters(),lr=0.001,weight_decay=1e-4)
+    best_loss=float('inf'); best_state=None; patience=50
+    for _ in range(300):
+        model.train(); opt.zero_grad()
+        loss=nn.MSELoss()(model(X_t),Y_t); loss.backward(); opt.step()
+        if loss.item()<best_loss:
+            best_loss=loss.item(); patience=50
+            best_state={k:v.clone().cpu() for k,v in model.state_dict().items()}
+        else:
+            patience-=1
+            if patience<=0: break
+    model.load_state_dict(best_state); model.eval()
+    with torch.no_grad():
+        p=model(torch.FloatTensor(y_train[-lookback:]).unsqueeze(0).to(DEVICE)).cpu().numpy().flatten()
+    return np.maximum(p,0), y_test
+
+def run_dlinear_2s(y_train, y_test, lookback=24):
+    """DLinear-2S: 两阶段=DLinear(非零数据)+分类器"""
+    nz=y_train>0
+    if nz.sum()<10: return np.full(len(y_test),np.mean(y_train)),y_test
+    qty,_=run_dlinear(y_train[nz], y_test, min(lookback, nz.sum()-len(y_test)-2))
+    y_bin=(y_train>0).astype(int)
+    cls=CatBoostClassifier(iterations=400,learning_rate=0.05,depth=4,l2_leaf_reg=10,
+        loss_function='Logloss',early_stopping_rounds=20,random_state=RANDOM_SEED,verbose=0)
+    # Use simple features for classifier
+    X_cls=np.column_stack([np.arange(len(y_train)),y_train])
+    X_cls_te=np.column_stack([np.arange(len(y_test))+len(y_train),np.full(len(y_test),0)])
+    nv=max(4,len(y_train)//4)
+    cls.fit(X_cls[:-nv],y_bin[:-nv],eval_set=(X_cls[-nv:],y_bin[-nv:]))
+    prob=np.clip(cls.predict_proba(X_cls_te)[:,1],0,1)
+    return prob*np.maximum(qty,0), y_test
+
+
+# ===================== ModernTCN (ICLR 2024) — 现代时序卷积 =====================
+class ModernTCNBlock(nn.Module):
+    def __init__(self, ch, dilation, dropout=0.1):
+        super().__init__()
+        self.conv=nn.Conv1d(ch,ch,3,padding=dilation,dilation=dilation)
+        self.norm=nn.BatchNorm1d(ch); self.dropout=nn.Dropout(dropout); self.act=nn.ReLU()
+    def forward(self,x):
+        return x+self.dropout(self.act(self.norm(self.conv(x))))  # residual
+
+class ModernTCN(nn.Module):
+    def __init__(self, lookback, horizon, channels=16, layers=4):
+        super().__init__()
+        self.proj=nn.Linear(1,channels)
+        dilations=[1,2,4,8][:layers]
+        self.blocks=nn.ModuleList([ModernTCNBlock(channels,d) for d in dilations])
+        self.head=nn.Linear(channels*lookback, horizon)
+    def forward(self,x):
+        h=self.proj(x.unsqueeze(-1)).transpose(1,2)  # (B,lookback,ch)->(B,ch,lookback)
+        for b in self.blocks: h=b(h)
+        return self.head(h.reshape(h.shape[0],-1))
+
+def run_moderntcn(y_train, y_test, lookback=24):
+    import torch.optim as optim
+    horizon=len(y_test)
+    X_tr,Y_tr=[],[]
+    for i in range(len(y_train)-lookback-horizon):
+        X_tr.append(y_train[i:i+lookback]); Y_tr.append(y_train[i+lookback:i+lookback+horizon])
+    if len(X_tr)<10: return np.full(horizon,np.mean(y_train)),y_test
+    X_tr=np.array(X_tr);Y_tr=np.array(Y_tr)
+    model=ModernTCN(lookback,horizon,channels=8,layers=3).to(DEVICE)
+    X_t=torch.FloatTensor(X_tr).to(DEVICE);Y_t=torch.FloatTensor(Y_tr).to(DEVICE)
+    opt=optim.Adam(model.parameters(),lr=0.001,weight_decay=1e-4)
+    best_loss=float('inf');best_state=None;patience=50
+    for _ in range(300):
+        model.train();opt.zero_grad()
+        loss=nn.MSELoss()(model(X_t),Y_t);loss.backward();opt.step()
+        if loss.item()<best_loss:
+            best_loss=loss.item();patience=50
+            best_state={k:v.clone().cpu() for k,v in model.state_dict().items()}
+        else:
+            patience-=1
+            if patience<=0: break
+    model.load_state_dict(best_state);model.eval()
+    with torch.no_grad():
+        p=model(torch.FloatTensor(y_train[-lookback:]).unsqueeze(0).to(DEVICE)).cpu().numpy().flatten()
+    return np.maximum(p,0),y_test
+
+def run_moderntcn_2s(y_train, y_test, lookback=24):
+    """ModernTCN-2S: 两阶段=ModernTCN(非零)+分类器"""
+    nz=y_train>0
+    if nz.sum()<10: return np.full(len(y_test),np.mean(y_train)),y_test
+    qty,_=run_moderntcn(y_train[nz],y_test,min(lookback,nz.sum()-len(y_test)-2))
+    y_bin=(y_train>0).astype(int)
+    cls=CatBoostClassifier(iterations=400,learning_rate=0.05,depth=4,l2_leaf_reg=10,
+        loss_function='Logloss',early_stopping_rounds=20,random_state=RANDOM_SEED,verbose=0)
+    X_cls=np.column_stack([np.arange(len(y_train)),y_train])
+    X_cls_te=np.column_stack([np.arange(len(y_test))+len(y_train),np.full(len(y_test),0)])
+    nv=max(4,len(y_train)//4)
+    cls.fit(X_cls[:-nv],y_bin[:-nv],eval_set=(X_cls[-nv:],y_bin[-nv:]))
+    prob=np.clip(cls.predict_proba(X_cls_te)[:,1],0,1)
+    return prob*np.maximum(qty,0),y_test
+
+
+# ===================== LightGBM(朴素) — 消融基线 =====================
+def run_lightgbm_pure(X_train_factors, y_train, X_test_factors, y_test):
+    """LightGBM(朴素): 直接回归, 无两阶段"""
+    try:
+        import lightgbm as lgb
+    except ImportError:
+        return None,y_test
+    reg=lgb.LGBMRegressor(n_estimators=500,learning_rate=0.03,max_depth=5,
+        num_leaves=31,reg_alpha=1,reg_lambda=3,random_state=RANDOM_SEED,verbose=-1)
+    nv=min(12,len(y_train)//4)
+    reg.fit(X_train_factors[:-nv],y_train[:-nv],eval_set=[(X_train_factors[-nv:],y_train[-nv:])])
+    return np.maximum(reg.predict(X_test_factors),0),y_test
+
+
 # ===================== 统一两阶段预测框架 =====================
 def _two_stage_fit_predict(X_tr, y_tr, X_te, stage2_regressor):
     """所有模型共享的两阶段预测: Stage1分类×Stage2回归 = P×Q"""
@@ -1670,8 +1808,10 @@ def print_metrics_table(all_metrics):
     lines.append(header)
     lines.append("-" * 130)
 
-    MODEL_ORDER = ['CatBoost', 'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA', 'TSB', 'Croston-SBA', 'Theta', 'SES', 'CatBoost-2S', 'Ridge-2S', 'ElasticNet-2S', 'GP-2S',
-                    'CondCatBoost', 'NHiTS', 'LightGBM', 'TwoStage']
+    MODEL_ORDER = ['CatBoost', 'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA', 'TSB', 'Croston-SBA',
+                    'Theta', 'SES', 'DLinear', 'DLinear-2S', 'ModernTCN', 'ModernTCN-2S',
+                    'CatBoost-2S', 'Ridge-2S', 'ElasticNet-2S', 'GP-2S',
+                    'CondCatBoost', 'NHiTS', 'LightGBM-pure', 'LightGBM', 'TwoStage']
     for material in MATERIALS:
         for i, model_name in enumerate(MODEL_ORDER):
             metrics = all_metrics[material].get(model_name, {})
@@ -1825,7 +1965,38 @@ def main():
             metrics_cr = evaluate_model(y_test_cr, y_pred_cr)
             all_results[material]['Croston-SBA'] = {'y_pred': y_pred_cr, 'y_test': y_test_cr, 'metrics': metrics_cr}
             all_metrics[material]['Croston-SBA'] = metrics_cr
-            logger.info(f"  [基线] Croston-SBA: R2={metrics_cr['R2']:.4f} sMAPE={metrics_cr['sMAPE']:.1f}")
+            logger.info(f"  [基线] Croston-SBA: R2={metrics_cr['R2']:.4f}")
+
+            # --- DLinear ---
+            y_pred_dl, y_test_dl = run_dlinear(y_train, y_test)
+            metrics_dl = evaluate_model(y_test_dl, y_pred_dl)
+            all_results[material]['DLinear'] = {'y_pred': y_pred_dl, 'y_test': y_test_dl, 'metrics': metrics_dl}
+            all_metrics[material]['DLinear'] = metrics_dl
+
+            # --- DLinear-2S ---
+            y_pred_dl2, y_test_dl2 = run_dlinear_2s(y_train, y_test)
+            metrics_dl2 = evaluate_model(y_test_dl2, y_pred_dl2)
+            all_results[material]['DLinear-2S'] = {'y_pred': y_pred_dl2, 'y_test': y_test_dl2, 'metrics': metrics_dl2}
+            all_metrics[material]['DLinear-2S'] = metrics_dl2
+
+            # --- ModernTCN ---
+            y_pred_mt, y_test_mt = run_moderntcn(y_train, y_test)
+            metrics_mt = evaluate_model(y_test_mt, y_pred_mt)
+            all_results[material]['ModernTCN'] = {'y_pred': y_pred_mt, 'y_test': y_test_mt, 'metrics': metrics_mt}
+            all_metrics[material]['ModernTCN'] = metrics_mt
+
+            # --- ModernTCN-2S ---
+            y_pred_mt2, y_test_mt2 = run_moderntcn_2s(y_train, y_test)
+            metrics_mt2 = evaluate_model(y_test_mt2, y_pred_mt2)
+            all_results[material]['ModernTCN-2S'] = {'y_pred': y_pred_mt2, 'y_test': y_test_mt2, 'metrics': metrics_mt2}
+            all_metrics[material]['ModernTCN-2S'] = metrics_mt2
+
+            # --- LightGBM(朴素) ---
+            y_pred_lgp, y_test_lgp = run_lightgbm_pure(X_train_factors, y_train, X_test_factors, y_test)
+            if y_pred_lgp is not None:
+                metrics_lgp = evaluate_model(y_test_lgp, y_pred_lgp)
+                all_results[material]['LightGBM-pure'] = {'y_pred': y_pred_lgp, 'y_test': y_test_lgp, 'metrics': metrics_lgp}
+                all_metrics[material]['LightGBM-pure'] = metrics_lgp
 
             # --- LightGBM 对比 ---
             # --- TwoStage-Ridge ---
