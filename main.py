@@ -1331,22 +1331,53 @@ def plot_demand_curves(data_dict):
     logger.info(f"  [图表] 需求量曲线 → {path}")
 
 
-# ===================== 批次事件驱动 Conditional CatBoost =====================
-def run_conditional_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                              material):
-    """批次事件驱动CatBoost: 更深树捕捉批次事件非线性交互"""
-    model = CatBoostRegressor(
-        iterations=2000, learning_rate=0.015, depth=7, l2_leaf_reg=4,
-        loss_function='RMSE', early_stopping_rounds=50,
-        random_seed=RANDOM_SEED, verbose=0)
-    n_val = min(12, len(y_train)//4)
-    X_tr, X_val = X_train_factors[:-n_val], X_train_factors[-n_val:]
-    y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
-    model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
-    y_pred = model.predict(X_test_factors)
-    y_test_orig = y_test
-    y_pred_orig = y_pred
-    return np.maximum(y_pred_orig, 0), y_test_orig, model.get_feature_importance(), model
+# ===================== 统一两阶段预测框架 =====================
+def _two_stage_fit_predict(X_tr, y_tr, X_te, stage2_regressor):
+    """所有模型共享的两阶段预测: Stage1分类×Stage2回归 = P×Q"""
+    y_bin = (y_tr > 0).astype(int)
+    n_pos, n_neg = y_bin.sum(), len(y_bin) - y_bin.sum()
+    if n_pos < 5 or n_neg < 5 or (y_tr > 0).sum() < 10:
+        return None, None  # 回退信号
+
+    cls = CatBoostClassifier(iterations=600, learning_rate=0.03, depth=5, l2_leaf_reg=5,
+        loss_function='Logloss', early_stopping_rounds=30, random_seed=RANDOM_SEED, verbose=0)
+    nv = max(6, len(y_tr)//4)
+    cls.fit(X_tr[:-nv], y_bin[:-nv], eval_set=(X_tr[-nv:], y_bin[-nv:]))
+    prob = np.clip(cls.predict_proba(X_te)[:,1], 0, 1)
+
+    nz = y_tr > 0
+    nv2 = min(6, nz.sum()//4)
+    stage2_regressor.fit(X_tr[nz][:-nv2], y_tr[nz][:-nv2],
+        eval_set=(X_tr[nz][-nv2:], y_tr[nz][-nv2:]))
+    return prob * np.maximum(stage2_regressor.predict(X_te), 0), cls
+
+
+def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material):
+    """TwoStage-CatBoost: 两阶段=分类×CatBoost回归"""
+    reg = CatBoostRegressor(iterations=1500, learning_rate=0.02, depth=6, l2_leaf_reg=3,
+        loss_function='RMSE', early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    if yp is None:
+        logger.warning(f'  [CatBoost-2S] 回退到直接回归')
+        nv = min(12, len(y_train)//4)
+        reg.fit(X_train_factors[:-nv], y_train[:-nv], eval_set=(X_train_factors[-nv:], y_train[-nv:]))
+        yp = np.maximum(reg.predict(X_test_factors), 0)
+    return yp, y_test, reg.get_feature_importance(), reg
+
+
+def run_conditional_catboost(X_train_factors, y_train, X_test_factors, y_test, material):
+    """TwoStage-CondCatBoost: 两阶段=分类×更深CatBoost回归"""
+    reg = CatBoostRegressor(iterations=2000, learning_rate=0.015, depth=7, l2_leaf_reg=4,
+        loss_function='RMSE', early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    if yp is None:
+        logger.warning(f'  [CondCatBoost-2S] 回退到直接回归')
+        nv = min(12, len(y_train)//4)
+        reg.fit(X_train_factors[:-nv], y_train[:-nv], eval_set=(X_train_factors[-nv:], y_train[-nv:]))
+        yp = np.maximum(reg.predict(X_test_factors), 0)
+    return yp, y_test, reg.get_feature_importance(), reg
+
+# 原 TwoStage 保留不变
 
 
 # ===================== 两阶段预测 (论文核心创新) =====================
