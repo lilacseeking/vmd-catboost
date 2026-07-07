@@ -1354,12 +1354,12 @@ def _two_stage_fit_predict(X_tr, y_tr, X_te, stage2_regressor):
     prob = np.clip(cls.predict_proba(X_te)[:,1], 0, 1)
 
     nz = y_tr > 0
-    nv2 = max(6, nz.sum()//3)
+    nv2 = min(6, nz.sum()//4)
+    is_cb = hasattr(stage2_regressor, 'get_params')
     try:
         stage2_regressor.fit(X_tr[nz][:-nv2], y_tr[nz][:-nv2],
             eval_set=(X_tr[nz][-nv2:], y_tr[nz][-nv2:]))
     except (TypeError, ValueError):
-        # sklearn模型不支持eval_set
         stage2_regressor.fit(X_tr[nz], y_tr[nz])
     return prob * np.maximum(stage2_regressor.predict(X_te), 0), cls
 
@@ -1472,6 +1472,60 @@ def run_ridge_2s(X_train_factors, y_train, X_test_factors, y_test, material):
         reg.fit(X_train_factors, y_train)
         yp = np.maximum(reg.predict(X_test_factors), 0)
     return yp, y_test, None, reg
+
+
+def run_elasticnet_2s(X_train_factors, y_train, X_test_factors, y_test, material):
+    """TwoStage-ElasticNet: 两阶段=分类×ElasticNet(L1+L2, 小样本强正则)"""
+    from sklearn.linear_model import ElasticNetCV
+    reg = ElasticNetCV(l1_ratio=[0.1,0.5,0.7,0.9,0.95,1.0], cv=min(5, (y_train>0).sum()),
+                       max_iter=5000, random_state=42)
+    nz = y_train > 0
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    if yp is None:
+        reg.fit(X_train_factors, y_train)
+        yp = np.maximum(reg.predict(X_test_factors), 0)
+    return yp, y_test, None, reg
+
+
+def run_gp_2s(X_train_factors, y_train, X_test_factors, y_test, material):
+    """TwoStage-GP: 两阶段=分类×GaussianProcess(小样本贝叶斯, 带不确定性)"""
+    from sklearn.gaussian_process import GaussianProcessRegressor
+    from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
+    nz = y_train > 0
+    if nz.sum() < 15:
+        # GP needs more samples; fallback to Ridge
+        return run_ridge_2s(X_train_factors, y_train, X_test_factors, y_test, material)
+    kernel = ConstantKernel(1.0) * RBF(length_scale=1.0) + WhiteKernel(noise_level=1.0)
+    reg = GaussianProcessRegressor(kernel=kernel, alpha=1e-2, normalize_y=True,
+                                    n_restarts_optimizer=3, random_state=42)
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    if yp is None:
+        reg.fit(X_train_factors, y_train)
+        yp = np.maximum(reg.predict(X_test_factors), 0)
+    return yp, y_test, None, reg
+
+
+def run_theta(y_train, y_test):
+    """Theta模型: 分解为趋势(SES) + 季节(乘法/加法), 适合间歇性序列"""
+    from statsmodels.tsa.forecasting.theta import ThetaModel
+    try:
+        m = ThetaModel(y_train, period=12)
+        fit = m.fit()
+        yp = fit.forecast(len(y_test))
+        return np.maximum(yp, 0), y_test
+    except Exception:
+        return np.full(len(y_test), np.mean(y_train)), y_test
+
+
+def run_ses(y_train, y_test):
+    """简单指数平滑: Holt-Winters的退化版, 无趋势无季节"""
+    from statsmodels.tsa.holtwinters import SimpleExpSmoothing
+    try:
+        m = SimpleExpSmoothing(y_train).fit(optimized=True)
+        yp = m.forecast(len(y_test))
+        return np.maximum(yp, 0), y_test
+    except Exception:
+        return np.full(len(y_test), np.mean(y_train)), y_test
 
 def run_croston_sba(y_train, y_test):
     """Croston-SBA: 间歇性需求专用预测。Decompose into demand interval + size.
@@ -1616,7 +1670,7 @@ def print_metrics_table(all_metrics):
     lines.append(header)
     lines.append("-" * 130)
 
-    MODEL_ORDER = ['CatBoost', 'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA', 'TSB', 'Croston-SBA', 'CatBoost-2S', 'Ridge-2S',
+    MODEL_ORDER = ['CatBoost', 'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA', 'TSB', 'Croston-SBA', 'Theta', 'SES', 'CatBoost-2S', 'Ridge-2S', 'ElasticNet-2S', 'GP-2S',
                     'CondCatBoost', 'NHiTS', 'LightGBM', 'TwoStage']
     for material in MATERIALS:
         for i, model_name in enumerate(MODEL_ORDER):
@@ -1799,6 +1853,30 @@ def main():
             all_metrics[material]['TwoStage'] = metrics_ts
             logger.info(f"        MSE={metrics_ts['MSE']:.4f} RMSE={metrics_ts['RMSE']:.4f} "
                          f"MAE={metrics_ts['MAE']:.4f} R2={metrics_ts['R2']:.4f}")
+
+            # --- Theta ---
+            y_pred_th, y_test_th = run_theta(y_train, y_test)
+            metrics_th = evaluate_model(y_test_th, y_pred_th)
+            all_results[material]['Theta'] = {'y_pred': y_pred_th, 'y_test': y_test_th, 'metrics': metrics_th}
+            all_metrics[material]['Theta'] = metrics_th
+
+            # --- SES ---
+            y_pred_ses, y_test_ses = run_ses(y_train, y_test)
+            metrics_ses = evaluate_model(y_test_ses, y_pred_ses)
+            all_results[material]['SES'] = {'y_pred': y_pred_ses, 'y_test': y_test_ses, 'metrics': metrics_ses}
+            all_metrics[material]['SES'] = metrics_ses
+
+            # --- ElasticNet-2S ---
+            y_pred_en, y_test_en, _, _ = run_elasticnet_2s(X_train_factors, y_train, X_test_factors, y_test, material)
+            metrics_en = evaluate_model(y_test_en, y_pred_en)
+            all_results[material]['ElasticNet-2S'] = {'y_pred': y_pred_en, 'y_test': y_test_en, 'metrics': metrics_en}
+            all_metrics[material]['ElasticNet-2S'] = metrics_en
+
+            # --- GaussianProcess-2S ---
+            y_pred_gp, y_test_gp, _, _ = run_gp_2s(X_train_factors, y_train, X_test_factors, y_test, material)
+            metrics_gp = evaluate_model(y_test_gp, y_pred_gp)
+            all_results[material]['GP-2S'] = {'y_pred': y_pred_gp, 'y_test': y_test_gp, 'metrics': metrics_gp}
+            all_metrics[material]['GP-2S'] = metrics_gp
 
             # --- VMD-CatBoost / VMD-Transformer-CatBoost / VMD-SVR ---
             # [DISABLED] 循环论证: VMD分解y->IMF作特征->预测y, Sigma(IMF)~=y
