@@ -2,11 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(python main.py)",
-      "Bash(pip install *)",
       "Bash(python *)",
-      "Bash(rm -rf C:/Users/lilacseeking/.matplotlib/fontlist-v330.json)",
-      "Bash(rm -rf \"C:/Users/lilacseeking/.matplotlib/fontlist\"*)",
-      "Read(//c/Users/lilacseeking/.matplotlib/**)",
+      "Bash(pip install *)",
+      "Bash(pip list)",
+      "Bash(rm -rf C:/Users/**/fontlist*)",
+      "Read(//c/Users/**/.matplotlib/**)",
+      "Read(**)",
+      "Bash(D:/Users/dell/PycharmProjects/vmd-catboost/.venv/Scripts/python *)",
+      "Bash(D:/Users/dell/PycharmProjects/vmd-catboost/.venv/Scripts/pip *)",
       "Bash(git push *)",
       "Bash(gh pr *)",
       "Bash(gh issue *)",
@@ -15,9 +18,7 @@
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(git pull *)",
-      "Bash(grep -E \"\\(MSE=|模型性能排序|1st|2nd|3rd\\)\" \"outputs/logs/$\\(ls -t outputs/logs/)",
-      "Bash(grep -E \"\\(MSE=|模型性能排序|1st|2nd|3rd\\)\" \"C:/Users/lilacseeking/PycharmProjects/vmd-catboost/outputs/logs/$\\(ls -t C:/Users/lilacseeking/PycharmProjects/vmd-catboost/outputs/logs/)",
-      "Bash(grep -E \"\\(MSE=|模型性能排序|1st|2nd|3rd|CatBoost基线\\)\" \"C:/Users/lilacseeking/PycharmProjects/vmd-catboost/outputs/logs/$\\(ls -t C:/Users/lilacseeking/PycharmProjects/vmd-catboost/outputs/logs/)",
+      "Bash(grep -E *)",
       "Bash(git commit *)"
     ]
   }

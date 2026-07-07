@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "akshare": {
+      "command": "D:/Users/dell/PycharmProjects/vmd-catboost/.venv/Scripts/python.exe",
+      "args": [
+        "D:/Users/dell/PycharmProjects/vmd-catboost/.mcp/akshare_mcp_server.py"
+      ],
+      "description": "AKShare MCP — 中国金融/商品/宏观数据, 用于获取原材料价格、用电量、新能源装机等外部影响因子"
+    }
+  }
+}
