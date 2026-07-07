@@ -1,0 +1,19 @@
+02:47:49 | INFO    | ======================================================================
+02:47:49 | INFO    |   配电网物资需求预测 —— VMD-CatBoost 模型对比实验
+02:47:49 | INFO    |   物资: Top5采购频率最高 (从ECP数据自动选择)
+02:47:49 | INFO    |   因子: 批次事件特征 + 项目数量 + 自回归滞后
+02:47:49 | INFO    |   模型: CatBoost / Conditional-CatBoost / N-HiTS / TwoStage + NaiveSeasonal/Persistence/SARIMA
+02:47:49 | INFO    | ======================================================================
+02:47:49 | INFO    |   日志文件: outputs/logs\main_20260708_024749.log
+02:47:49 | INFO    | [1/8] 加载数据...
+02:47:49 | INFO    | 读取已有数据文件: inputs\data.xlsx
+02:47:49 | INFO    |   Sheet[交流避雷器]: 81 条, demand范围=[0.00, 7580.00]
+02:47:49 | INFO    |   Sheet[电容式电压互感器]: 81 条, demand范围=[0.00, 426.00]
+02:47:49 | INFO    |   Sheet[交流支柱绝缘子]: 81 条, demand范围=[0.00, 4888.00]
+02:47:49 | INFO    |   Sheet[断路器保护]: 81 条, demand范围=[0.00, 173.00]
+02:47:49 | INFO    |   Sheet[电抗器保护]: 81 条, demand范围=[0.00, 67.00]
+02:47:49 | INFO    |   物资: ['交流避雷器', '电容式电压互感器', '交流支柱绝缘子', '断路器保护', '电抗器保护']
+02:47:50 | INFO    |   [图表] 需求量曲线 → outputs/figures\需求量曲线.png
+02:47:50 | INFO    | 
+02:47:50 | INFO    | [2/8] 处理 交流避雷器 (交流避雷器)...
+02:47:50 | INFO    |   [Spearman因子选择] 交流避雷器: top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']

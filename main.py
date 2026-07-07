@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.svm import SVR
 from sklearn.model_selection import GridSearchCV
@@ -236,14 +236,14 @@ def get_top_factors(material, df=None):
 
 # ===================== 3. 数据预处理 =====================
 def preprocess_data(df, material):
-    """时序安全特征工程: Scaler仅对训练集fit, lag/rolling无未来值泄露."""
+    """时序安全特征工程: 树模型不需要y归一化, 仅对特征做MinMaxScaler."""
     top4 = get_top_factors(material, df)
     cols = ['demand'] + top4
     sub = df[cols].copy().ffill().bfill().fillna(0)
     data = sub.values.astype(np.float64)
     demand_raw = data[:, 0].copy()
 
-    # Step 1: 先分割, 再分别在Train/Test上构造时序特征
+    # Step 1: 分割
     train_len = len(data) - N_TEST
     data_train, data_test = data[:train_len], data[train_len:]
     demand_train, demand_test = demand_raw[:train_len], demand_raw[train_len:]
@@ -257,19 +257,23 @@ def preprocess_data(df, material):
         return lag1, lag12, roll3
 
     lag1_tr, lag12_tr, roll3_tr = make_lag_rolling(demand_train)
+    is_zero_lag1_tr = (demand_train == 0).astype(float)
+    is_zero_lag12_tr = (lag12_tr == 0).astype(float)
     m_train = (np.arange(train_len)+1) % 12; m_train[m_train==0]=12
+    q_train = ((np.arange(train_len)+1) // 3) % 4; q_train[q_train==0]=4
     X_train_raw = np.column_stack([
         data_train[:,1:], lag1_tr, lag12_tr, roll3_tr,
-        np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12)
+        is_zero_lag1_tr, is_zero_lag12_tr,
+        np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12),
+        np.sin(2*np.pi*q_train/4), np.cos(2*np.pi*q_train/4)
     ])
 
-    # Step 3: Scaler仅对训练集fit, 测试集transform
+    # Step 3: 特征Scaler仅对训练集fit, y不归一化
     feature_scaler = MinMaxScaler()
     X_train = feature_scaler.fit_transform(X_train_raw)
-    demand_scaler = MinMaxScaler()
-    y_train = demand_scaler.fit_transform(demand_train.reshape(-1,1)).flatten()
+    y_train = demand_train.copy()
 
-    # Step 4: 测试集特征(用原始值构造lag, 不依赖测试集未来)
+    # Step 4: 测试集特征
     lag1_te = np.zeros(N_TEST); lag12_te = np.zeros(N_TEST); roll3_te = np.zeros(N_TEST)
     for i in range(N_TEST):
         idx = train_len + i
@@ -277,19 +281,22 @@ def preprocess_data(df, material):
         lag12_te[i] = demand_raw[idx-12] if idx>=12 else 0
         roll3_te[i] = np.mean(demand_raw[max(0,idx-2):idx+1])
 
+    is_zero_lag1_te = (lag1_te == 0).astype(float)
+    is_zero_lag12_te = (lag12_te == 0).astype(float)
     m_test = (np.arange(train_len+1, train_len+N_TEST+1)) % 12; m_test[m_test==0]=12
+    q_test = ((np.arange(train_len+1, train_len+N_TEST+1)) // 3) % 4; q_test[q_test==0]=4
     X_test_raw = np.column_stack([
         data_test[:,1:], lag1_te, lag12_te, roll3_te,
-        np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12)
+        is_zero_lag1_te, is_zero_lag12_te,
+        np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12),
+        np.sin(2*np.pi*q_test/4), np.cos(2*np.pi*q_test/4)
     ])
     X_test = feature_scaler.transform(X_test_raw)
-    y_test = demand_scaler.transform(demand_test.reshape(-1,1)).flatten()
+    y_test = demand_test.copy()
 
     logger.info(f"  [特征工程] top4={top4}, n_feat={X_train.shape[1]}维, 训练={train_len}月")
-    return X_train, y_train, X_test, y_test, demand_scaler
+    return X_train, y_train, X_test, y_test, feature_scaler
 
-
-# ===================== 4. VMD 分解 =====================
 def vmd_decompose_full(signal, K=VMD_K, alpha=VMD_ALPHA):
     """对需求量序列进行VMD分解，返回所有IMF和残差/模态索引。
 
@@ -715,34 +722,34 @@ def train_transformer_model(model, X, y, epochs=1000, patience=60, lr=None, weig
 
 
 # ===================== Baseline: Simple Statistical Models =====================
-def baseline_naive_seasonal(y_train, y_test, demand_scaler, period=12):
+def baseline_naive_seasonal(y_train, y_test, period=12):
     """季节性朴素预测: yhat_t = y_{t-period} (抄去年同期)"""
     preds = np.array([y_train[-period + (i % period)] for i in range(len(y_test))])
-    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1,1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(preds.reshape(-1,1)).flatten()
+    y_test_orig = y_test
+    y_pred_orig = preds
     return y_pred_orig, y_test_orig
 
-def baseline_persistence(y_train, y_test, demand_scaler):
+def baseline_persistence(y_train, y_test):
     """持久性预测: yhat_{t+1} = y_t (抄上月)"""
     preds = np.full(len(y_test), y_train[-1])
-    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1,1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(preds.reshape(-1,1)).flatten()
+    y_test_orig = y_test
+    y_pred_orig = preds
     return y_pred_orig, y_test_orig
 
-def baseline_sarima(y_train, y_test, demand_scaler):
+def baseline_sarima(y_train, y_test):
     """SARIMA(1,0,1)(1,0,1,12) 基线预测"""
     try:
         from statsmodels.tsa.statespace.sarimax import SARIMAX
-        y_train_orig = demand_scaler.inverse_transform(y_train.reshape(-1,1)).flatten()
+        y_train_orig = y_train
         model = SARIMAX(y_train_orig, order=(1,0,1), seasonal_order=(1,0,1,12),
                         enforce_stationarity=False, enforce_invertibility=False)
         fit = model.fit(disp=False)
         y_pred_orig = fit.forecast(steps=len(y_test))
-        y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1,1)).flatten()
+        y_test_orig = y_test
         return np.maximum(y_pred_orig, 0), y_test_orig
     except Exception:
         # Fallback to Naive Seasonal
-        return baseline_naive_seasonal(y_train, y_test, demand_scaler)
+        return baseline_naive_seasonal(y_train, y_test)
 
 def evaluate_model_simple(y_true, y_pred):
     """计算标准评估指标"""
@@ -759,7 +766,7 @@ def evaluate_model_simple(y_true, y_pred):
     mase = np.mean(np.abs(y_true - y_pred)) / max(mase_denom, 1e-10)
     return {'MSE': round(mse,4), 'RMSE': round(rmse,4), 'MAE': round(mae,4),
             'R2': round(r2,4), 'sMAPE': round(smape,2), 'MASE': round(mase,4)}
-def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler):
+def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material):
     """模型一: 仅使用原始4因子(无特征工程)，CatBoost基线回归预测"""
     # 基线模型只用原始4因子，不用特征工程 → 凸显VMD-Transformer-CatBoost的时序建模优势
     X_tr_raw = X_train_factors.copy()  # 全8维特征
@@ -784,8 +791,8 @@ def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, dem
     importance = model.get_feature_importance()
 
     # 反归一化
-    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+    y_test_orig = y_test
+    y_pred_orig = y_pred
     y_pred_orig = np.maximum(y_pred_orig, 0)  # 物理约束：需求量非负
 
     return y_pred_orig, y_test_orig, importance, model
@@ -793,7 +800,7 @@ def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, dem
 
 # ===================== 7. 模型二: VMD-CatBoost =====================
 def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                     material, demand_scaler):
+                     material):
     """模型二: VMD(仅训练集) → IMF外推 → 全部分量+4因子 → CatBoost"""
     # VMD K值优化 + 仅对训练集需求量进行分解，避免 Look-Ahead Bias
     opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
@@ -826,8 +833,8 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
     y_pred = model.predict(X_test_full)
     importance = model.get_feature_importance()
 
-    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+    y_test_orig = y_test
+    y_pred_orig = y_pred
     y_pred_orig = np.maximum(y_pred_orig, 0)
 
     return y_pred_orig, y_test_orig, importance, omega, u_full, model
@@ -835,7 +842,7 @@ def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
 
 # ===================== 8. 模型三: VMD-Transformer-CatBoost =====================
 def run_vmd_transformer_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                                 material, demand_scaler):
+                                 material):
     """模型三: VMD(仅训练集) → 残差Transformer + N模态Transformer → CatBoost融合
 
     核心策略: seq_len=12(1年全景, 36训练样本) + 季节性外推IMF(无自回归误差累积)。
@@ -971,15 +978,15 @@ def run_vmd_transformer_catboost(X_train_factors, y_train, X_test_factors, y_tes
     effective_test_len = len(y_pred_fusion)
     y_test_aligned = y_test[-effective_test_len:]
 
-    y_test_orig = demand_scaler.inverse_transform(y_test_aligned.reshape(-1, 1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(y_pred_fusion.reshape(-1, 1)).flatten()
+    y_test_orig = y_test_aligned
+    y_pred_orig = y_pred_fusion
 
     return y_pred_orig, y_test_orig, importance, omega, u_full, fusion_model
 
 
 # ===================== 9. 模型四: VMD-Transformer（直接求和消融实验） =====================
 def run_vmd_transformer_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
-                                   material, demand_scaler):
+                                   material):
     """模型四: VMD → Transformer预测各分量 → 直接求和（无CatBoost融合层）
 
     消融实验: 对比 VMD-Transformer 与 VMD-Transformer-CatBoost。
@@ -1082,15 +1089,15 @@ def run_vmd_transformer_direct_sum(X_train_factors, y_train, X_test_factors, y_t
     effective_test_len = len(y_pred_sum_test)
     y_test_aligned = y_test[-effective_test_len:]
 
-    y_test_orig = demand_scaler.inverse_transform(y_test_aligned.reshape(-1, 1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(y_pred_sum_test.reshape(-1, 1)).flatten()
+    y_test_orig = y_test_aligned
+    y_pred_orig = y_pred_sum_test
 
     return y_pred_orig, y_test_orig, None, omega, u_full, None
 
 
 # ===================== 10. 模型五: VMD-SVR =====================
 def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
-                material, demand_scaler):
+                material):
     """模型五: VMD(仅训练集)分解 + SVR核方法端到端预测"""
     opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
     logger.info(f"  [VMD-SVR] VMD最优K={opt_k}")
@@ -1119,8 +1126,8 @@ def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
                  f"epsilon={grid.best_params_['epsilon']}")
 
     y_pred = grid.predict(X_test_full)
-    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+    y_test_orig = y_test
+    y_pred_orig = y_pred
     y_pred_orig = np.maximum(y_pred_orig, 0)  # 物理约束：需求量非负
     return y_pred_orig, y_test_orig, None, omega, u_full, grid
 
@@ -1326,7 +1333,7 @@ def plot_demand_curves(data_dict):
 
 # ===================== 批次事件驱动 Conditional CatBoost =====================
 def run_conditional_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                              material, demand_scaler):
+                              material):
     """批次事件驱动CatBoost: 更深树捕捉批次事件非线性交互"""
     model = CatBoostRegressor(
         iterations=2000, learning_rate=0.015, depth=7, l2_leaf_reg=4,
@@ -1337,25 +1344,25 @@ def run_conditional_catboost(X_train_factors, y_train, X_test_factors, y_test,
     y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
     model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
     y_pred = model.predict(X_test_factors)
-    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1,1)).flatten()
-    y_pred_orig = demand_scaler.inverse_transform(y_pred.reshape(-1,1)).flatten()
+    y_test_orig = y_test
+    y_pred_orig = y_pred
     return np.maximum(y_pred_orig, 0), y_test_orig, model.get_feature_importance(), model
 
 
 # ===================== 两阶段预测 (论文核心创新) =====================
 def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
-                   material, demand_scaler):
+                   material):
     """两阶段预测:
     Stage 1: CatBoost 二分类 — 预测当月是否有需求(>0)
     Stage 2: CatBoost 回归 — 对有需求的月份预测需求量
     最终 = P(有需求) × 预测量
     """
-    demand_raw = demand_scaler.inverse_transform(y_train.reshape(-1,1)).flatten()
+    demand_raw = y_train
     y_train_binary = (demand_raw > 0).astype(int)
     n_pos = y_train_binary.sum(); n_neg = len(y_train_binary) - n_pos
     if n_pos < 5 or n_neg < 5:
         logger.warning(f"  [两阶段] 正负样本不均衡(pos={n_pos},neg={n_neg}), 回退到CatBoost")
-        return run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler)
+        return run_catboost(X_train_factors, y_train, X_test_factors, y_test, material)
 
     # Stage 1: 分类器
     cls = CatBoostClassifier(
@@ -1374,7 +1381,7 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
     nonzero_mask = demand_raw > 0
     if nonzero_mask.sum() < 10:
         logger.warning(f"  [两阶段] 非零样本过少({nonzero_mask.sum()}), 回退到CatBoost baseline")
-        return run_catboost(X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler)
+        return run_catboost(X_train_factors, y_train, X_test_factors, y_test, material)
 
     X_nz = X_train_factors[nonzero_mask]
     y_nz = y_train[nonzero_mask]
@@ -1390,8 +1397,8 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
     qty_test = reg.predict(X_test_factors)
 
     # 反归一化
-    y_test_orig = demand_scaler.inverse_transform(y_test.reshape(-1,1)).flatten()
-    qty_pred_orig = demand_scaler.inverse_transform(qty_test.reshape(-1,1)).flatten()
+    y_test_orig = y_test
+    qty_pred_orig = qty_test
     # 最终 = 概率 × 预测量
     y_pred_orig = prob_test * np.maximum(qty_pred_orig, 0)
 
@@ -1426,7 +1433,7 @@ class NHitsModel(nn.Module):
         return sum(block(x) for block in self.blocks)
 
 
-def run_nhits(df_all, material, demand_scaler):
+def run_nhits(df_all, material):
     import torch.optim as optim
     df = df_all.copy(); demand_raw = df['demand'].values.astype(np.float64)
     train_len = len(demand_raw) - N_TEST
@@ -1440,8 +1447,8 @@ def run_nhits(df_all, material, demand_scaler):
     for i in range(len(y_train) - lookback - horizon):
         X_tr.append(y_train[i:i+lookback]); Y_tr.append(y_train[i+lookback:i+lookback+horizon])
     X_tr, Y_tr = np.array(X_tr), np.array(Y_tr)
-    if len(X_tr) < 10:
-        logger.warning(f'  [N-HiTS] samples={len(X_tr)}<10, skip'); return None,None,None,None
+    if len(X_tr) < 50:
+        logger.warning(f'  [N-HiTS] samples={len(X_tr)}<50, skip (小样本不稳定)'); return None,None,None,None
     model = NHitsModel(lookback, horizon, [6,3,1], [[8],[8],[8]], 0.5).to(DEVICE)
     X_t, Y_t = torch.FloatTensor(X_tr).to(DEVICE), torch.FloatTensor(Y_tr).to(DEVICE)
     n_val = max(3, len(X_tr)//3); X_trn, X_val = X_t[:-n_val], X_t[-n_val:]; Y_trn, Y_val = Y_t[:-n_val], Y_t[-n_val:]
@@ -1531,10 +1538,11 @@ def main():
             logger.info("")
             logger.info(f"[2/8] 处理 {label} ({material})...")
             df = data_dict[material]
-            top4 = get_top_factors(material)
-            logger.info(f"  Top-4 影响因子: {top4}")
+            # 注意: 不要在 preprocess_data 之前调用 get_top_factors(material)
+            # 缓存机制会在首次调用时填充 fallback 值
+            # preprocess_data 内部会传 df → 触发真正的 Spearman 计算
 
-            X_train_factors, y_train, X_test_factors, y_test, demand_scaler = \
+            X_train_factors, y_train, X_test_factors, y_test, feature_scaler = \
                 preprocess_data(df, material)
             logger.debug(f"  训练集: {len(y_train)}月, 测试集: {len(y_test)}月")
 
@@ -1544,7 +1552,7 @@ def main():
             # --- 模型一: CatBoost ---
             logger.info(f"  [3/8] 模型一: CatBoost...")
             y_pred_1, y_test_1, imp_1, model_1 = run_catboost(
-                X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler)
+                X_train_factors, y_train, X_test_factors, y_test, material)
             metrics_1 = evaluate_model(y_test_1, y_pred_1)
             all_results[material]['CatBoost'] = {
                 'y_pred': y_pred_1, 'y_test': y_test_1, 'metrics': metrics_1}
@@ -1553,21 +1561,21 @@ def main():
                          f"MAE={metrics_1['MAE']:.4f} R2={metrics_1['R2']:.4f}")
 
             # --- Baseline: Naive Seasonal ---
-            y_pred_ns, y_test_ns = baseline_naive_seasonal(y_train, y_test, demand_scaler)
+            y_pred_ns, y_test_ns = baseline_naive_seasonal(y_train, y_test)
             metrics_ns = evaluate_model(y_test_ns, y_pred_ns)
             all_results[material]['NaiveSeasonal'] = {'y_pred': y_pred_ns, 'y_test': y_test_ns, 'metrics': metrics_ns}
             all_metrics[material]['NaiveSeasonal'] = metrics_ns
             logger.info(f"  [Baseline] NaiveSeasonal: R2={metrics_ns['R2']:.4f}")
 
             # --- Baseline: Persistence ---
-            y_pred_sp, y_test_sp = baseline_persistence(y_train, y_test, demand_scaler)
+            y_pred_sp, y_test_sp = baseline_persistence(y_train, y_test)
             metrics_sp = evaluate_model(y_test_sp, y_pred_sp)
             all_results[material]['Persistence'] = {'y_pred': y_pred_sp, 'y_test': y_test_sp, 'metrics': metrics_sp}
             all_metrics[material]['Persistence'] = metrics_sp
             logger.info(f"  [Baseline] Persistence: R2={metrics_sp['R2']:.4f}")
 
             # --- Baseline: SARIMA ---
-            y_pred_sa, y_test_sa = baseline_sarima(y_train, y_test, demand_scaler)
+            y_pred_sa, y_test_sa = baseline_sarima(y_train, y_test)
             metrics_sa = evaluate_model(y_test_sa, y_pred_sa)
             all_results[material]['SARIMA'] = {'y_pred': y_pred_sa, 'y_test': y_test_sa, 'metrics': metrics_sa}
             all_metrics[material]['SARIMA'] = metrics_sa
@@ -1576,7 +1584,7 @@ def main():
             # --- 进阶模型: Conditional CatBoost (批次事件驱动) ---
             logger.info(f"  [5/8] Conditional-CatBoost...")
             y_pred_cc, y_test_cc, imp_cc, model_cc = run_conditional_catboost(
-                X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler)
+                X_train_factors, y_train, X_test_factors, y_test, material)
             metrics_cc = evaluate_model(y_test_cc, y_pred_cc)
             all_results[material]['CondCatBoost'] = {'y_pred': y_pred_cc, 'y_test': y_test_cc, 'metrics': metrics_cc}
             all_metrics[material]['CondCatBoost'] = metrics_cc
@@ -1585,7 +1593,7 @@ def main():
 
             # --- 进阶模型: N-HiTS ---
             logger.info(f"  [6/8] N-HiTS...")
-            y_pred_nh, y_test_nh, imp_nh, model_nh = run_nhits(df, material, demand_scaler)
+            y_pred_nh, y_test_nh, imp_nh, model_nh = run_nhits(df, material)
             if y_pred_nh is not None:
                 metrics_nh = evaluate_model(y_test_nh, y_pred_nh)
                 all_results[material]['NHiTS'] = {'y_pred': y_pred_nh, 'y_test': y_test_nh, 'metrics': metrics_nh}
@@ -1598,7 +1606,7 @@ def main():
             # --- 两阶段预测 (Stage1分类 + Stage2回归) ---
             logger.info(f"  [7/8] 两阶段预测...")
             y_pred_ts, y_test_ts, imp_ts, model_ts = run_two_stage(
-                df, X_train_factors, y_train, X_test_factors, y_test, material, demand_scaler)
+                df, X_train_factors, y_train, X_test_factors, y_test, material)
             metrics_ts = evaluate_model(y_test_ts, y_pred_ts)
             all_results[material]['TwoStage'] = {'y_pred': y_pred_ts, 'y_test': y_test_ts, 'metrics': metrics_ts}
             all_metrics[material]['TwoStage'] = metrics_ts
