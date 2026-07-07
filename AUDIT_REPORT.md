@@ -1,278 +1,236 @@
-## 配电网物资需求预测系统 - 第一性原理审计报告
+## 配电网物资需求预测系统 - 第一性原理审计报告（代码级）
 
-审计日期: 2026-07-08  
-审计范围: main.py 全部 1671 行代码 + inputs/data.xlsx 5 个物资数据  
+审计日期: 2026-07-08 (首次) → 2026-07-08 (第二轮复审)
+审计范围: main.py 全部 1759 行代码 + inputs/data.xlsx 5 个物资数据
 审计方法: 逐函数代码走读 + 数值实验验证 + 数据质量分析
 
 ---
 
-### 一、致命级 Bug（直接导致预测结果错误）
+### 〇、修复状态总览
 
-#### Bug #1: log1p 反变换缺失（expm1）— 所有模型评估全部失真
-
-**位置**: `run_catboost()` (L806-808), `run_conditional_catboost()` (L1359-1361), `run_two_stage()` (L1411-1415)
-
-**问题本质**: `preprocess_data(use_log=True)` 在 L249 对需求做了 `log1p` 变换后再用 `MinMaxScaler` 归一化。模型在 scaled-log 空间训练和预测，但反归一化时只做了 `demand_scaler.inverse_transform()`，得到的仍然是 log 空间的值（如 7.18），没有调用 `np.expm1()` 转回原始需求空间（如 1315）。
-
-**数值验证**:
-```
-测试集真实需求:     [1315, 862, 194, 7580, 88, 0]
-反归一化结果(当前): [7.18, 6.76, 5.27, 8.93, 4.49, 0]  ← log空间值
-expm1后(正确):      [1315, 862, 194, 7580, 88, 0]
-
-当前R2(错误): -0.4889  ← 完美模型却得到负R2
-正确R2:        1.0000
-```
-
-**影响范围**: CatBoost、CondCatBoost、TwoStage 三个模型的全部评估指标（MSE/RMSE/MAE/R2）均完全失真。当前报告的 R2 值不具备任何参考意义。
-
-**修复**: 在每个模型的 `inverse_transform` 之后加上 `np.expm1()`:
-```python
-y_pred_orig = np.expm1(demand_scaler.inverse_transform(y_pred.reshape(-1,1)).flatten())
-y_test_orig = np.expm1(demand_scaler.inverse_transform(y_test.reshape(-1,1)).flatten())
-```
+| 编号 | 原始问题 | 状态 | 说明 |
+|------|---------|------|------|
+| Bug #1 | log1p 反变换缺失 (expm1) | **已修复** | preprocess_data 不再使用 log1p/MinMaxScaler 变换 y |
+| Bug #2 | roll3_te 滚动均值数据泄露 | **已修复** | `idx-3:idx` 仅使用历史值 |
+| Bug #3 | SARIMA 在 log 空间拟合 | **已修复** | SARIMA 直接在原始需求空间拟合 |
+| Bug #4 | N-HiTS 被阈值跳过 | **未修复** | `len(X_tr) < 50` 阈值不变，仍然跳过 |
+| Bug #5 | NaiveSeasonal/Persistence log 空间反归一化 | **已修复** | 不再需要反归一化 |
+| Issue #6 | 5/6 因子全局相同 | **部分修复** | 移除 has_batch/digital_bids，但 3/4 因子仍全局相同 |
+| Issue #7 | 数据高度稀疏 | **未修复** | 35-38% 零值率 + CV > 1 不变 |
+| Issue #8 | project_count 一枝独秀 | **未修复** | 仍然是唯一有区分度的因子 |
+| Issue #9 | CatBoost 基线注释与实现不符 | **新形态** | run_catboost 被二次定义，语义混乱 |
+| Issue #10 | N-HiTS 仅用单变量需求序列 | **未修复** | 本地实现仍只使用 demand |
+| Issue #11 | 评估指标体系不完整 | **部分修复** | sMAPE/MASE 已在汇总表展示 |
+| Issue #12 | 无交叉验证 | **未修复** | 仍为单一 train/test 分割 |
+| 新增 | Croston-SBA 间歇性需求基线已加入 | **正面改进** | — |
+| 新增 | LightGBM 对比模型已加入 | **正面改进** | — |
+| 新增 | VMD 模型循环论证已识别并禁用 | **正面改进** | 但有潜伏 Bug |
 
 ---
 
-#### Bug #2: 测试集 roll3_te 滚动均值存在数据泄露
+### 一、已修复的致命 Bug（3 个致命 + 1 个严重）
 
-**位置**: `preprocess_data()` L291
+#### Bug #1: log1p 反变换缺失 (expm1) — ✅ 已修复
 
-**问题本质**:
-```python
-# 当前代码 (有泄露)
-roll3_te[i] = np.mean(y_work[max(0,idx-2):idx+1])
-# 当 i=0, idx=train_len 时: mean(y_work[train_len-2 : train_len+1])
-# y_work[train_len] 是测试集第一个真实值 → 未来数据泄露!
-```
+**修复方式**: `preprocess_data()` (L236-296) 彻底重构。不再对 y 做 `log1p` + `MinMaxScaler` 变换，直接使用原始需求值。注释明确写道"树模型不需要 y 归一化"。
 
-**数值验证** (以交流避雷器为例):
-```
-roll3_te[0] 包含了 y_work[69]（测试集第一个值）
-正确做法应为: np.mean(y_work[idx-3:idx])  # 只用历史值
-平均泄露幅度: 1.02 (相对差异 19.5%)
-最大泄露幅度: 2.39
-```
+**影响**: 所有模型的预测值和评估指标现在在同一个尺度上（原始需求量），expm1 问题从架构层面消除。
 
-**影响范围**: 所有使用 `X_test_factors` 的模型（CatBoost、CondCatBoost、TwoStage），测试集特征中混入了未来信息，导致评估结果虚高。
+#### Bug #2: roll3_te 滚动均值数据泄露 — ✅ 已修复
 
-**修复**: 将 `y_work[max(0,idx-2):idx+1]` 改为 `y_work[max(0,idx-3):idx]`
+**修复方式**:
+- 训练集 (L254): `np.mean(seq[max(0,i-3):i])` — 仅使用 i-3 到 i-1 的历史值
+- 测试集 (L280): `np.mean(demand_raw[max(0,idx-3):idx])` — 仅使用 idx-3 到 idx-1 的历史值
 
----
+**验证**: Python 切片 `idx-3:idx` 右端开，不包含 `idx` 本身。修复正确。
 
-#### Bug #3: SARIMA 在 log 空间拟合 — 预测值量纲错误
+#### Bug #3: SARIMA 在 log 空间拟合 — ✅ 已修复
 
-**位置**: `baseline_sarima()` L755-759
+**修复方式**: y 不再经过 log1p 变换，`baseline_sarima()` (L737-750) 直接在原始需求空间拟合。量纲一致。
 
-**问题本质**: SARIMA 模型对 `y_train_orig`（实际是 log-demand）做 `SARIMAX` 拟合，然后在原始尺度上 `fit.forecast()` 得到 log 空间的预测值，直接与原始尺度的 `y_test_orig` 对比。
+#### Bug #5: NaiveSeasonal/Persistence log 空间反归一化 — ✅ 已修复
 
-```python
-y_train_orig = demand_scaler.inverse_transform(y_train.reshape(-1,1)).flatten()
-# y_train_orig 实际是 log1p(demand) 的值，如 [0, 4.6, 5.3, ...]
-model = SARIMAX(y_train_orig, ...)  # 拟合的是 log-demand
-y_pred_orig = fit.forecast(steps=12)  # 预测值也在 log 空间
-# 但 y_test_orig 是原始需求空间 → 量纲不匹配
-```
-
-**影响**: SARIMA 基线的 R2 指标不可信。
-
-**修复**: 在 SARIMA 的 forecast 结果上添加 `np.expm1()`，或者直接用原始需求值拟合 SARIMA（在 log 变换之前取数据）。
+**修复方式**: y 不再变换，基线模型直接返回原始尺度的预测值。`baseline_naive_seasonal()` (L723-728) 和 `baseline_persistence()` (L730-735) 直接返回原始值。
 
 ---
 
-### 二、严重级 Bug（模型无法正常执行或严重偏差）
+### 二、未修复的 Bug
 
-#### Bug #4: N-HiTS 被跳过 — 阈值设置导致模型永远不执行
+#### Bug #4: N-HiTS 被阈值跳过 — ❌ 未修复
 
-**位置**: `run_nhits()` L1462
+**位置**: `run_nhits()` L1527
 
-**问题本质**:
+**当前代码**:
 ```python
 if len(X_tr) < 50:
-    logger.warning('...'); return None, None, None, None
-```
-实际训练数据: `train_len=69`, `lookback=24`, `horizon=12` → `n_samples = 69-24-12 = 33`
-33 < 50 → **N-HiTS 在所有 5 个物资上都被跳过**。即使将 lookback 缩短到 12，也只有 45 个样本，仍然被跳过。
-
-**影响**: N-HiTS 模型从未参与任何预测，日志中记录的是 "跳过"。
-
-**修复**: 将阈值从 50 降低到合理值（如 10），或缩短 lookback 以增加样本数。
-
----
-
-#### Bug #5: NaiveSeasonal/Persistence 基线在 log 空间反归一化
-
-**位置**: `baseline_naive_seasonal()` L740-741, `baseline_persistence()` L746-748
-
-**问题本质**: 与 Bug #1 相同，基线模型的预测值在 scaled-log 空间经过 `inverse_transform` 后仍是 log 值，缺少 `expm1` 步骤。
-
-**影响**: NaiveSeasonal 和 Persistence 的评估指标也不可信，但它们作为基线模型，相对排名的参考价值还在。
-
----
-
-### 三、中等级问题（影响模型效果但非错误）
-
-#### Issue #6: 5/6 个影响因子是所有物资共用的全局变量
-
-**位置**: 数据文件 `data.xlsx` 本身
-
-**数值验证**:
-```
-transformer_bids: 所有物资完全相同 = True
-monthly_bid_count: 所有物资完全相同 = True
-uhv_bids: 所有物资完全相同 = True
-has_batch: 所有物资完全相同 = True (且sum=77, 所有值一致)
-digital_bids: 所有物资完全相同 = True
-project_count: 所有物资完全相同 = False  ← 唯一有区分度的因子
+    logger.warning(f'  [N-HiTS] samples={len(X_tr)}<50, skip (小样本不稳定)'); return None,None,None,None
 ```
 
-**影响**: 5 个"影响因子"实际上是全局市场指标，不会随物资变化。对于 CatBoost 等模型来说，同一时刻所有物资的这 5 个特征值完全一样，模型只能靠 `project_count` 和 lag/rolling 特征来区分不同物资的需求模式。
+**实际数据**: `train_len=69`, `lookback=24`, `horizon=12` → `n_samples = 69-24-12 = 33`。33 < 50 → N-HiTS 在所有 5 个物资上仍然被跳过。
 
-**建议**: 引入物资级别的区分特征，如历史同期需求量、物资类别编码、采购周期等。
-
----
-
-#### Issue #7: 数据高度稀疏 — 35-38% 的零值 + 极高方差
-
-**数据统计**:
-| 物资 | 0值比例 | CV | 测试集0值 |
-|------|---------|-----|-----------|
-| 交流避雷器 | 35.8% | 1.58 | 17% |
-| 电容式电压互感器 | 35.8% | 1.07 | 17% |
-| 交流支柱绝缘子 | 38.3% | 1.23 | 33% |
-| 断路器保护 | 38.3% | 1.79 | 25% |
-| 电抗器保护 | 38.3% | 1.39 | 25% |
-
-**影响**: 
-- 超过 1/3 的月份需求为 0，传统回归模型不擅长处理
-- CV > 1 说明标准差大于均值，数据极度分散
-- 除 TwoStage 外，其他模型直接回归 0 值和非 0 值混合的数据，效果必然受限
-
-**建议**: 所有模型都应采用两阶段策略（先分类是否有需求，再回归非零需求量），而不仅仅 TwoStage 一个模型。
+**附加问题**: N-HiTS 仍使用本地 PyTorch 实现（`NHitsBlock`/`NHitsModel` at L1488-1510），`requirements.txt` 中已添加 `darts>=0.30.0` 但代码中无任何 import darts。
 
 ---
 
-#### Issue #8: project_count 一枝独秀 — 其他因子边际贡献极低
+### 三、新发现的 Bug
 
-**Spearman 相关性**:
-| 因子 | 交流避雷器 | 互感器 | 绝缘子 | 断路器 | 电抗器 |
-|------|-----------|--------|--------|--------|--------|
-| project_count | 0.86*** | 0.90*** | 0.90*** | 0.90*** | 0.90*** |
-| transformer_bids | 0.73*** | 0.61*** | 0.65*** | 0.51*** | 0.51*** |
-| monthly_bid_count | 0.67*** | 0.64*** | 0.58*** | 0.60*** | 0.57*** |
-| uhv_bids | 0.31*** | 0.42*** | 0.31*** | 0.53*** | 0.51*** |
-| has_batch | 0.26** | 0.26** | 0.25** | 0.25** | 0.25** |
-| digital_bids | 0.25** | 0.27** | 0.21* | 0.19* | 0.21* |
-| lag-12 自相关 | 0.48 | 0.32 | 0.30 | -0.02 | 0.08 |
+#### Bug #6: run_catboost 函数双重定义 — 严重语义混乱 🔴
 
-**分析**: `project_count` 一个因子就解释了绝大部分方差（r > 0.86）。has_batch 和 digital_bids 的相关性很弱（r < 0.27），且对所有物资完全相同，对模型几乎无贡献。lag-12 自相关在部分物资上接近 0，说明年度季节性很弱。
+**位置**: L767 和 L1353 两次定义 `run_catboost`
 
----
+**第一次定义** (L767):
+```python
+def run_catboost(...):
+    """模型一: 仅使用原始4因子(无特征工程)，CatBoost基线回归预测"""
+    # 实际使用了全部 13 维特征
+    model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
+    y_pred = model.predict(X_te_raw)
+```
 
-#### Issue #9: CatBoost 基线注释与实现不符
+**第二次定义** (L1353):
+```python
+def run_catboost(...):
+    """TwoStage-CatBoost: 两阶段=分类×CatBoost回归"""
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+```
 
-**位置**: `run_catboost()` L782-783
+Python 中后定义的函数覆盖先定义的。`main()` 在 L1635 调用 `run_catboost` 时执行的是 L1353 的 TwoStage 版本。
 
-注释写着"仅使用原始4因子(无特征工程)"，但实际传入的 `X_train_factors` 是完整的 17 维特征（4因子 + lag + rolling + 月编码 + 季度编码）。这意味着 CatBoost 基线与 CondCatBoost 使用的是相同特征集，无法体现"基线 vs 进阶"的差异。
+**影响**:
+1. L767 的代码是死代码，永远不会执行
+2. 汇总表中 "CatBoost" 标签实际对应 TwoStage-CatBoost
+3. "CatBoost" 和 "TwoStage" (L1382 的 `run_two_stage`) 是两个几乎相同的 TwoStage 实现，失去了真正的朴素 CatBoost 基线对比点
 
----
+**建议**: 删除 L767 死代码，或将 L1353 重命名为 `run_twostage_catboost()`，并恢复一个真正的朴素 CatBoost 基线。
 
-#### Issue #10: N-HiTS 仅用单变量需求序列 — 浪费了所有特征
+#### Bug #7: VMD/Transformer 超参字典键名与物资标识不匹配 — 潜伏崩溃 🔴
 
-**位置**: `run_nhits()` 整个函数
+**位置**: L109-117
 
-N-HiTS 只使用 `demand` 单变量时序数据做预测，完全没有利用 `project_count` 等高相关性因子。相比之下，CatBoost 利用了全部 17 维特征。
+```python
+VMD_ALPHA_MAP = {'ac_arrester': 4000, 'cvt': 2000, 'post_insulator': 3000}
+TF_MULTI_DIM = {'ac_arrester': 32, 'cvt': 24, 'post_insulator': 32}
+TF_NLAYERS = {'ac_arrester': 2, 'cvt': 2, 'post_insulator': 2}
+# ... 等等
+```
 
----
+实际物资标识（data.xlsx sheet 名）是中文：`交流避雷器`、`电容式电压互感器`、`交流支柱绝缘子`、`断路器保护`、`电抗器保护`。
 
-### 四、评估体系问题
+当 VMD/Transformer 函数调用 `VMD_ALPHA_MAP[material]` 时，`material` 是中文字符串，会触发 `KeyError`。
 
-#### Issue #11: 评估指标体系不完整
+**当前影响**: VMD 模型已被禁用（L1714-1715），Bug 不会触发。但如果未来重新启用将导致崩溃。Transformer 超参字典有 `.get(material, default)` 回退机制（如 L888 `TF_MULTI_DIM[material]` 无 fallback，会直接崩溃）。
 
-当前仅使用 MSE/RMSE/MAE/R2，对于高零值率 + 高方差的间歇性需求数据，缺少更适用的指标：
-- **sMAPE**: 代码中计算了但未在汇总表展示
-- **MASE**: 代码中计算了但未在汇总表展示
-- **WAPE** (Weighted Absolute Percentage Error): 未实现
-- **POEM** (Percentage Of Exact Matches for zero months): 未实现 — 对于 35%+ 零值率的数据，模型能否正确预测"本月无需求"很关键
-- **连续预测为0但实际非0的错误**: 未统计 — 这是业务上最不可接受的错误类型
-
----
-
-#### Issue #12: 所有图表仅展示训练期最后12月 — 无交叉验证
-
-**位置**: `main()` 中的评估流程
-
-模型只在单一的 train/test 分割上评估（前 69 月训练，后 12 月测试），没有任何交叉验证或滚动评估。在仅 81 个数据点的情况下，12 个测试点的评估结果方差极大，一次偶然的好/坏预测就能显著改变 R2。
+**建议**: 统一键名（改为中文物资名或物资索引），或添加 `.get()` 回退默认值。
 
 ---
 
-### 五、改进计划（按优先级排序）
+### 四、部分修复的设计问题
 
-#### Phase 1: 修复致命 Bug（预计影响: 所有指标将发生根本性变化）
+#### Issue #6: 因子全局相同 — 部分修复
 
-| 序号 | 改进项 | 具体操作 | 预计效果 |
-|------|--------|---------|---------|
-| 1.1 | 修复 expm1 缺失 | 在所有 `inverse_transform` 后加 `np.expm1()` | 所有模型的评估指标将大幅改善 |
-| 1.2 | 修复 roll3_te 泄露 | 将 `idx-2:idx+1` 改为 `idx-3:idx` | 消除数据泄露，评估更公正 |
-| 1.3 | 修复 SARIMA 空间 | SARIMA 用原始需求拟合，或在 forecast 后加 expm1 | SARIMA 基线将正常工作 |
+**改进**: FACTOR_NAMES 从 6 个缩减为 4 个，移除了 `has_batch` 和 `digital_bids`（对所有物资完全相同且相关性 < 0.27 的因子）。
 
-#### Phase 2: 修复模型级问题（预计影响: N-HiTS 可用 + 模型效果提升）
+**残留问题**: 数据验证结果——当前 4 个因子中仍有 3 个对所有物资全局相同：
+```
+project_count:      all_identical=False  ← 唯一有区分度
+transformer_bids:   all_identical=True
+monthly_bid_count:  all_identical=True
+uhv_bids:           all_identical=True
+```
 
-| 序号 | 改进项 | 具体操作 | 预计效果 |
-|------|--------|---------|---------|
-| 2.1 | N-HiTS 阈值调整 | 将 `< 50` 改为 `< 10`，缩短 lookback 到 12 | N-HiTS 可以正常运行 |
-| 2.2 | 全局零值前置处理 | 所有模型输出后 clip 到 0，或引入统一的零值分类前置 | 减少"预测为负"的无意义输出 |
-| 2.3 | 修复 CatBoost 基线注释 | 让 CatBoost 只使用 top-4 原始因子（不含 lag/rolling） | 基线 vs 进阶模型对比更清晰 |
+#### Issue #9: CatBoost 基线注释与实现不符 — 新形态
 
-#### Phase 3: 数据与特征改进（预计影响: 模型上限提升）
+**原始问题**: 注释说"仅使用原始4因子"但实际用全部特征。
+**当前状态**: 第一个 `run_catboost`（L767）注释说"仅4因子"但实际用 13 维特征；第二个定义（L1353）覆盖了第一个，变为 TwoStage。函数定义冲突成为新形态的问题。
 
-| 序号 | 改进项 | 具体操作 | 预计效果 |
-|------|--------|---------|---------|
-| 3.1 | 引入物资级区分特征 | 添加物资类别 one-hot 编码、历史同期需求占比 | 让模型能区分不同物资 |
-| 3.2 | 剔除/替换弱因子 | 移除 has_batch、digital_bids（全局相同且相关性 < 0.27） | 减少噪声特征对模型的干扰 |
-| 3.3 | 探索更多外部因子 | 如: 季节性指数、GDP增长率、电网投资额、历史同期比 | 增强预测信号 |
-| 3.4 | 添加"上月是否为零"标志 | 作为所有模型的通用特征 | 帮助模型学习间歇性需求模式 |
+#### Issue #11: 评估指标体系不完整 — 部分修复
 
-#### Phase 4: 模型架构改进（预计影响: 引入更适合的模型）
+**改进**: `print_metrics_table()` (L1551-1583) 展示 MSE、RMSE、sMAPE、MASE、R2 五项指标。
 
-| 序号 | 改进项 | 具体操作 | 预计效果 |
-|------|--------|---------|---------|
-| 4.1 | 引入 Croston 方法 | 专为间歇性需求设计的预测方法 | 对高零值率数据效果显著优于回归 |
-| 4.2 | 引入 TSB 方法 | Croston 改进版，更新概率估计 | 学术界公认的间歇性需求最优方法之一 |
-| 4.3 | 所有模型统一两阶段 | 先分类是否有需求，再回归非零量 | 对零值率 35%+ 的数据有显著改善 |
-| 4.4 | 引入 LightGBM/XGBoost | 对比 CatBoost | 可能发现更优的树模型 |
-| 4.5 | 模型集成 | 多个模型的加权平均或投票融合 | 降低单模型方差 |
-| 4.6 | 引入交叉验证 | 滚动窗口 backtesting（至少 3 折） | 评估更稳定可靠 |
-
-#### Phase 5: 评估与可复现性改进
-
-| 序号 | 改进项 | 具体操作 | 预计效果 |
-|------|--------|---------|---------|
-| 5.1 | 展示完整评估指标 | 在汇总表中加入 sMAPE、MASE、WAPE | 更全面的评价模型性能 |
-| 5.2 | 添加零值预测准确率 | 统计模型正确预测"需求=0"的比例 | 评估间歇性需求建模能力 |
-| 5.3 | 添加预测方向准确率 | 统计需求变化的方向是否正确 | 对业务决策更有价值 |
+**残留问题**: 缺少零值预测准确率、方向准确率、统计显著性检验。
 
 ---
 
-### 六、根因分析: 为什么当前预测效果差
+### 五、未修复的设计问题
 
-从第一性原理出发，当前系统预测效果差的根因可以归结为三个层面：
+#### Issue #7: 数据高度稀疏 — ❌ 未修复
 
-**底层: 数据与评估空间错位**  
-Bug #1（expm1 缺失）是最根本的原因。所有模型在 log 空间做预测，但评估时用原始空间对比。这导致即使模型学到了完美映射，R2 也会是负数。这不是模型能力的问题，而是工程实现的问题。
+| 物资 | 0值比例 | CV | 均值 |
+|------|---------|-----|------|
+| 交流避雷器 | 35.8% | 1.58 | 952.6 |
+| 电容式电压互感器 | 35.8% | 1.07 | 112.6 |
+| 交流支柱绝缘子 | 38.3% | 1.23 | 838.4 |
+| 断路器保护 | 38.3% | 1.79 | 15.0 |
+| 电抗器保护 | 38.3% | 1.39 | 9.6 |
 
-**中层: 数据泄露 + 模型被跳过**  
-Bug #2（roll3_te 泄露）让测试集特征包含了未来信息，虚假地提升了模型表现。Bug #4（N-HiTS 被跳过）则让一个模型完全不工作。
+**部分缓解**: 统一 TwoStage 框架更好地处理了零值。
 
-**上层: 数据本身的挑战性**  
-35%+ 的零值率、CV > 1 的高方差、81 个月的小样本、5/6 因子无物资区分度 — 这些是数据固有的难点，不是 bug，但需要更有针对性的模型设计来应对。
+#### Issue #8: project_count 一枝独秀 — ❌ 未修复
+
+#### Issue #10: N-HiTS 仅用单变量需求序列 — ❌ 未修复
+
+#### Issue #12: 无交叉验证 — ❌ 未修复
+
+仍为单一 69/12 月 train/test 分割，12 个测试点中约 4 个为零值。
 
 ---
 
-### 七、结论
+### 六、正面改进
 
-当前系统存在 **5 个 Bug** 和 **7 个设计问题**。其中 Bug #1（expm1 缺失）是最致命的，它导致所有模型的评估指标完全失真，使得我们无法判断任何模型的真实预测能力。
+#### 改进 #1: VMD 循环论证已识别并禁用
 
-**修复 Bug #1-#3 后，预计所有模型的 R2 指标将出现根本性变化**，当前报告的 R2 值（CatBoost 约 0.3-0.8，TwoStage 约 0.5-0.8）不具备参考价值。
+main() L1714-1715:
+```python
+# [DISABLED] 循环论证: VMD分解y->IMF作特征->预测y, Sigma(IMF)~=y
+```
+这是对 VMD 分解方法论层面的根本性质疑的正确回应。
 
-建议严格按照 Phase 1 → Phase 5 的顺序逐步实施改进，每完成一个 Phase 后重新运行评估，以量化每个改进的实际效果。
+#### 改进 #2: Croston-SBA 间歇性需求基线已加入
+
+`run_croston_sba()` (L1441-1466) 实现 SBA 修正的 Croston 方法——学术界公认的间歇性需求预测标准方法。
+
+#### 改进 #3: LightGBM 对比模型已加入
+
+`run_lightgbm()` (L1470-1485) 使用 TwoStage 框架 + LightGBM，作为 CatBoost 对照。
+
+#### 改进 #4: 统一 TwoStage 框架
+
+所有主模型（CatBoost、CondCatBoost、TwoStage、LightGBM）统一使用两阶段预测框架。
+
+#### 改进 #5: 特征工程重构
+
+`preprocess_data()` 完全重写，消除了 log1p + MinMaxScaler 对 y 的变换。13 维特征结构清晰。
+
+---
+
+### 七、仍需关注的问题清单
+
+#### 代码级
+
+| 优先级 | 问题 | 位置 | 建议 |
+|--------|------|------|------|
+| 高 | run_catboost 双重定义 | L767 + L1353 | 删除死代码或重命名，恢复朴素基线 |
+| 高 | VMD_ALPHA_MAP / TF_* 键名不匹配 | L109-117 | 更新键名或添加 .get() 回退 |
+| 中 | N-HiTS 阈值 50 | L1527 | 降低到 10 或缩短 lookback |
+| 中 | N-HiTS 未迁移到 darts | L1488-1549 | 用 darts NHiTSModel 替代 |
+| 低 | darts 在 requirements.txt 但未使用 | requirements.txt L3 | 使用或移除 |
+| 低 | get_top_factors 选择无意义 | L205-232 | 4 个因子选 top-4 无选择余地 |
+
+#### 评估级
+
+| 优先级 | 问题 | 建议 |
+|--------|------|------|
+| 高 | 无交叉验证 | 滚动窗口回测（至少 3 折） |
+| 中 | 缺少零值预测准确率 | 添加 "正确预测需求=0" 的比例指标 |
+| 中 | 缺少统计显著性检验 | 添加 Diebold-Mariano 或 Wilcoxon 检验 |
+| 低 | 缺少方向准确率 | 添加需求变化方向准确率 |
+
+---
+
+### 八、结论
+
+**5 个原始致命/严重 Bug 中 4 个已修复**（expm1 通过架构重构消除，roll3_te 泄露已修正，SARIMA 和基线模型已正常）。**N-HiTS 阈值问题仍未修复**。
+
+**新增 2 个代码级 Bug**: run_catboost 双重定义（影响当前运行——"CatBoost"标签实际是 TwoStage），VMD/Transformer 超参字典键名不匹配（潜伏 Bug，当前被禁用不触发）。
+
+**架构层面显著改善**: VMD 循环论证已禁用、Croston-SBA 和 LightGBM 已加入、统一 TwoStage 框架。但核心方法论问题（时间序列 vs 离散事件预测）仍存在——详见 DESIGN_AUDIT_REPORT.md。

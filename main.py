@@ -235,7 +235,7 @@ def get_top_factors(material, df=None):
 # ===================== 3. 数据预处理 =====================
 def preprocess_data(df, material):
     """时序安全特征工程: 树模型不需要y归一化, 仅对特征做MinMaxScaler."""
-    top4 = get_top_factors(material, df)
+    top4 = get_top_factors(material, df.iloc[:len(df)-N_TEST])
     cols = ['demand'] + top4
     sub = df[cols].copy().ffill().bfill().fillna(0)
     data = sub.values.astype(np.float64)
@@ -256,7 +256,9 @@ def preprocess_data(df, material):
 
     lag1_tr, lag12_tr, roll3_tr = make_lag_rolling(demand_train)
     is_zero_lag1_tr = (demand_train == 0).astype(float)
-    is_zero_lag12_tr = (lag12_tr == 0).astype(float)
+    is_zero_lag12_tr = np.zeros(train_len, dtype=float)
+    for i in range(12, train_len):
+        is_zero_lag12_tr[i] = (demand_train[i-12] == 0)
     m_train = (np.arange(train_len)+1) % 12; m_train[m_train==0]=12
     q_train = ((np.arange(train_len)+1) // 3) % 4; q_train[q_train==0]=4
     X_train_raw = np.column_stack([
@@ -749,6 +751,12 @@ def baseline_sarima(y_train, y_test):
         # Fallback to Naive Seasonal
         return baseline_naive_seasonal(y_train, y_test)
 
+
+def baseline_naive_mean(y_train, y_test):
+    """历史均值预测: 所有测试月预测为训练集均值"""
+    preds = np.full(len(y_test), np.mean(y_train))
+    return preds, y_test
+
 def evaluate_model_simple(y_true, y_pred):
     """计算标准评估指标"""
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
@@ -763,7 +771,8 @@ def evaluate_model_simple(y_true, y_pred):
     mase_denom = np.mean(naive_errors) if len(naive_errors) > 0 else 1
     mase = np.mean(np.abs(y_true - y_pred)) / max(mase_denom, 1e-10)
     return {'MSE': round(mse,4), 'RMSE': round(rmse,4), 'MAE': round(mae,4),
-            'R2': round(r2,4), 'sMAPE': round(smape,2), 'MASE': round(mase,4)}
+            'R2': round(r2,4), 'sMAPE': round(smape,2), 'MASE': round(mase,4),
+            'zero_acc': round(np.mean((y_true==0)==(y_pred==0)),4)}
 def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material):
     """模型一: 仅使用原始4因子(无特征工程)，CatBoost基线回归预测"""
     # 基线模型只用原始4因子，不用特征工程 → 凸显VMD-Transformer-CatBoost的时序建模优势
@@ -1141,7 +1150,8 @@ def evaluate_model(y_true, y_pred):
     mase_denom = np.mean(np.abs(y_true[1:]-y_true[:-1])) if len(y_true)>1 else 1
     mase = mae / max(mase_denom, 1e-10) if mase_denom > 0 else 999
     return {'MSE': round(mse,4), 'RMSE': round(rmse,4), 'MAE': round(mae,4),
-            'R2': round(r2,4), 'sMAPE': round(smape,2), 'MASE': round(mase,4)}
+            'R2': round(r2,4), 'sMAPE': round(smape,2), 'MASE': round(mase,4),
+            'zero_acc': round(np.mean((y_true==0)==(y_pred==0)),4)}
 
 
 # ===================== 10. 可视化 =====================
@@ -1344,13 +1354,26 @@ def _two_stage_fit_predict(X_tr, y_tr, X_te, stage2_regressor):
     prob = np.clip(cls.predict_proba(X_te)[:,1], 0, 1)
 
     nz = y_tr > 0
-    nv2 = min(6, nz.sum()//4)
-    stage2_regressor.fit(X_tr[nz][:-nv2], y_tr[nz][:-nv2],
-        eval_set=(X_tr[nz][-nv2:], y_tr[nz][-nv2:]))
+    nv2 = max(6, nz.sum()//3)
+    try:
+        stage2_regressor.fit(X_tr[nz][:-nv2], y_tr[nz][:-nv2],
+            eval_set=(X_tr[nz][-nv2:], y_tr[nz][-nv2:]))
+    except (TypeError, ValueError):
+        # sklearn模型不支持eval_set
+        stage2_regressor.fit(X_tr[nz], y_tr[nz])
     return prob * np.maximum(stage2_regressor.predict(X_te), 0), cls
 
 
 def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material):
+    """CatBoost(朴素): 直接回归, 不使用两阶段框架(消融基线)"""
+    reg = CatBoostRegressor(iterations=1500, learning_rate=0.02, depth=6, l2_leaf_reg=3,
+        loss_function='RMSE', early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
+    nv = min(12, len(y_train)//4)
+    reg.fit(X_train_factors[:-nv], y_train[:-nv], eval_set=(X_train_factors[-nv:], y_train[-nv:]))
+    yp = np.maximum(reg.predict(X_test_factors), 0)
+    return yp, y_test, reg.get_feature_importance(), reg
+
+def run_catboost_2s(X_train_factors, y_train, X_test_factors, y_test, material):
     """TwoStage-CatBoost: 两阶段=分类×CatBoost回归"""
     reg = CatBoostRegressor(iterations=1500, learning_rate=0.02, depth=6, l2_leaf_reg=3,
         loss_function='RMSE', early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
@@ -1438,6 +1461,18 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
 
 # ===================== 批次事件驱动 Conditional CatBoost =====================
 # ===================== Croston-SBA 间歇性需求基线 =====================
+
+def run_ridge_2s(X_train_factors, y_train, X_test_factors, y_test, material):
+    """TwoStage-Ridge: 两阶段=分类×Ridge回归 (小样本更稳定)"""
+    from sklearn.linear_model import RidgeCV
+    reg = RidgeCV(alphas=[0.01,0.1,1.0,10.0,100.0])
+    nz = y_train > 0
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    if yp is None:
+        reg.fit(X_train_factors, y_train)
+        yp = np.maximum(reg.predict(X_test_factors), 0)
+    return yp, y_test, None, reg
+
 def run_croston_sba(y_train, y_test):
     """Croston-SBA: 间歇性需求专用预测。Decompose into demand interval + size.
     SBA变体对Croston偏差做修正: yhat = (1-alpha/2) * size_ema / interval_ema"""
@@ -1467,6 +1502,28 @@ def run_croston_sba(y_train, y_test):
 
 
 # ===================== LightGBM 对比模型 =====================
+
+def run_tsb(y_train, y_test):
+    """TSB (Teunter-Syntetos-Babai 2011): 间歇性需求预测.
+    比Croston-SBA增加概率更新: P(t+1) = (1-beta)*P(t) + beta*O(t)"""
+    d_raw = y_train
+    alpha, beta = 0.1, 0.1
+    nonzero_idx = np.where(d_raw > 0)[0]
+    if len(nonzero_idx) < 2:
+        return np.full(len(y_test), np.mean(d_raw)), y_test
+    size_ema = d_raw[nonzero_idx[0]]
+    prob_ema = 1.0 / (nonzero_idx[0] + 1) if nonzero_idx[0] > 0 else 1.0
+    last_nz = nonzero_idx[0]
+    for i in range(1, len(nonzero_idx)):
+        interval = nonzero_idx[i] - last_nz
+        demand = d_raw[nonzero_idx[i]]
+        O = 1.0 / interval if interval > 0 else 1.0
+        prob_ema = (1 - beta) * prob_ema + beta * O
+        size_ema = (1 - alpha) * size_ema + alpha * demand
+        last_nz = nonzero_idx[i]
+    yhat = prob_ema * size_ema
+    return np.full(len(y_test), max(yhat, 0)), y_test
+
 def run_lightgbm(X_train_factors, y_train, X_test_factors, y_test):
     """LightGBM: 两阶段=分类×LGBM回归, 对比CatBoost"""
     try:
@@ -1559,7 +1616,7 @@ def print_metrics_table(all_metrics):
     lines.append(header)
     lines.append("-" * 130)
 
-    MODEL_ORDER = ['CatBoost', 'NaiveSeasonal', 'Persistence', 'SARIMA', 'Croston-SBA',
+    MODEL_ORDER = ['CatBoost', 'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA', 'TSB', 'Croston-SBA', 'CatBoost-2S', 'Ridge-2S',
                     'CondCatBoost', 'NHiTS', 'LightGBM', 'TwoStage']
     for material in MATERIALS:
         for i, model_name in enumerate(MODEL_ORDER):
@@ -1648,6 +1705,20 @@ def main():
             all_metrics[material]['NaiveSeasonal'] = metrics_ns
             logger.info(f"  [Baseline] NaiveSeasonal: R2={metrics_ns['R2']:.4f}")
 
+            # --- Baseline: Naive-Mean ---
+            y_pred_nm, y_test_nm = baseline_naive_mean(y_train, y_test)
+            metrics_nm = evaluate_model(y_test_nm, y_pred_nm)
+            all_results[material]['NaiveMean'] = {'y_pred': y_pred_nm, 'y_test': y_test_nm, 'metrics': metrics_nm}
+            all_metrics[material]['NaiveMean'] = metrics_nm
+            logger.info(f"  [Baseline] NaiveMean: R2={metrics_nm['R2']:.4f}")
+
+            # --- Baseline: TSB ---
+            y_pred_tsb, y_test_tsb = run_tsb(y_train, y_test)
+            metrics_tsb = evaluate_model(y_test_tsb, y_pred_tsb)
+            all_results[material]['TSB'] = {'y_pred': y_pred_tsb, 'y_test': y_test_tsb, 'metrics': metrics_tsb}
+            all_metrics[material]['TSB'] = metrics_tsb
+            logger.info(f"  [Baseline] TSB: R2={metrics_tsb['R2']:.4f}")
+
             # --- Baseline: Persistence ---
             y_pred_sp, y_test_sp = baseline_persistence(y_train, y_test)
             metrics_sp = evaluate_model(y_test_sp, y_pred_sp)
@@ -1664,6 +1735,17 @@ def main():
 
             # --- 进阶模型: Conditional CatBoost (批次事件驱动) ---
             logger.info(f"  [5/8] Conditional-CatBoost...")
+            # --- CatBoost-2S (两阶段) ---
+            logger.info(f"  [5/8] CatBoost-2S...")
+            y_pred_cb2, y_test_cb2, imp_cb2, model_cb2 = run_catboost_2s(
+                X_train_factors, y_train, X_test_factors, y_test, material)
+            metrics_cb2 = evaluate_model(y_test_cb2, y_pred_cb2)
+            all_results[material]['CatBoost-2S'] = {'y_pred': y_pred_cb2, 'y_test': y_test_cb2, 'metrics': metrics_cb2}
+            all_metrics[material]['CatBoost-2S'] = metrics_cb2
+            logger.info(f"  [5/8] CatBoost-2S: R2={metrics_cb2['R2']:.4f}")
+
+            # --- 进阶模型: Conditional CatBoost ---
+            logger.info(f"  [6/8] Conditional-CatBoost...")
             y_pred_cc, y_test_cc, imp_cc, model_cc = run_conditional_catboost(
                 X_train_factors, y_train, X_test_factors, y_test, material)
             metrics_cc = evaluate_model(y_test_cc, y_pred_cc)
@@ -1690,6 +1772,13 @@ def main():
             all_results[material]['Croston-SBA'] = {'y_pred': y_pred_cr, 'y_test': y_test_cr, 'metrics': metrics_cr}
             all_metrics[material]['Croston-SBA'] = metrics_cr
             logger.info(f"  [基线] Croston-SBA: R2={metrics_cr['R2']:.4f} sMAPE={metrics_cr['sMAPE']:.1f}")
+
+            # --- LightGBM 对比 ---
+            # --- TwoStage-Ridge ---
+            y_pred_rd, y_test_rd, _, _ = run_ridge_2s(X_train_factors, y_train, X_test_factors, y_test, material)
+            metrics_rd = evaluate_model(y_test_rd, y_pred_rd)
+            all_results[material]['Ridge-2S'] = {'y_pred': y_pred_rd, 'y_test': y_test_rd, 'metrics': metrics_rd}
+            all_metrics[material]['Ridge-2S'] = metrics_rd
 
             # --- LightGBM 对比 ---
             y_pred_lgb, y_test_lgb = run_lightgbm(X_train_factors, y_train, X_test_factors, y_test)
