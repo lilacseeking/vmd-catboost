@@ -1,0 +1,194 @@
+03:28:55 | INFO    | ======================================================================
+03:28:55 | INFO    |   配电网物资需求预测 —— VMD-CatBoost 模型对比实验
+03:28:55 | INFO    |   物资: Top5采购频率最高 (从ECP数据自动选择)
+03:28:55 | INFO    |   因子: 批次事件特征 + 项目数量 + 自回归滞后
+03:28:55 | INFO    |   模型: CatBoost / Conditional-CatBoost / N-HiTS / TwoStage + NaiveSeasonal/Persistence/SARIMA
+03:28:55 | INFO    | ======================================================================
+03:28:55 | INFO    |   日志文件: outputs/logs\main_20260708_032855.log
+03:28:55 | INFO    | [1/8] 加载数据...
+03:28:55 | INFO    | 读取已有数据文件: inputs\data.xlsx
+03:28:55 | INFO    |   Sheet[火灾报警系统]: 81 条, demand范围=[0.00, 18.00]
+03:28:55 | INFO    |   Sheet[线路在线监测装置]: 81 条, demand范围=[0.00, 1549.00]
+03:28:55 | INFO    |   Sheet[一体化电源系统]: 81 条, demand范围=[0.00, 27.00]
+03:28:55 | INFO    |   Sheet[变电在线监测装置]: 81 条, demand范围=[0.00, 36.00]
+03:28:55 | INFO    |   Sheet[端子箱]: 81 条, demand范围=[0.00, 75.00]
+03:28:55 | INFO    |   物资: ['火灾报警系统', '线路在线监测装置', '一体化电源系统', '变电在线监测装置', '端子箱']
+03:28:55 | INFO    |   [图表] 需求量曲线 → outputs/figures\需求量曲线.png
+03:28:55 | INFO    | 
+03:28:55 | INFO    | [2/8] 处理 火灾报警系统 (火灾报警系统)...
+03:28:55 | INFO    |   [Spearman因子选择] 火灾报警系统: top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+03:28:55 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_feat=13维, 训练=69月
+03:28:55 | DEBUG   |   训练集: 69月, 测试集: 12月
+03:28:55 | INFO    |   [3/8] 模型一: CatBoost...
+03:28:56 | INFO    |         MSE=9.8926 RMSE=3.1452 MAE=1.6643 R2=0.0578
+03:28:56 | INFO    |   [Baseline] NaiveSeasonal: R2=0.0317
+03:28:56 | INFO    |   [Baseline] Persistence: R2=0.0000
+03:28:56 | INFO    |   [Baseline] SARIMA: R2=0.1713
+03:28:56 | INFO    |   [5/8] Conditional-CatBoost...
+03:28:57 | INFO    |         MSE=9.9046 RMSE=3.1472 MAE=1.6652 R2=0.0567
+03:28:57 | INFO    |   [6/8] N-HiTS...
+03:28:57 | WARNING |   [N-HiTS] samples=33<50, skip (小样本不稳定)
+03:28:57 | INFO    |   [N-HiTS] 跳过 (未安装或失败)
+03:28:57 | INFO    |   [基线] Croston-SBA: R2=-0.3945 sMAPE=133.8
+03:28:58 | INFO    |   [对比] LightGBM: R2=0.0551
+03:28:58 | INFO    |   [7/8] 两阶段预测...
+03:28:59 | INFO    |   [两阶段] Stage1分类准确率=83.33%, 非零训练样本=27
+03:28:59 | INFO    |         MSE=10.1897 RMSE=3.1921 MAE=1.7253 R2=0.0295
+03:28:59 | INFO    |   [图表] 特征重要性(火灾报警系统) → outputs/figures\特征重要性_火灾报警系统.png
+03:28:59 | INFO    | 
+03:28:59 | INFO    | [2/8] 处理 线路在线监测装置 (线路在线监测装置)...
+03:28:59 | INFO    |   [Spearman因子选择] 线路在线监测装置: top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+03:28:59 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_feat=13维, 训练=69月
+03:28:59 | DEBUG   |   训练集: 69月, 测试集: 12月
+03:28:59 | INFO    |   [3/8] 模型一: CatBoost...
+03:29:00 | INFO    |         MSE=166011.7637 RMSE=407.4454 MAE=191.6000 R2=0.0422
+03:29:00 | INFO    |   [Baseline] NaiveSeasonal: R2=-0.3704
+03:29:00 | INFO    |   [Baseline] Persistence: R2=-0.3496
+03:29:00 | INFO    |   [Baseline] SARIMA: R2=-0.3473
+03:29:00 | INFO    |   [5/8] Conditional-CatBoost...
+03:29:01 | INFO    |         MSE=165834.6840 RMSE=407.2280 MAE=191.3310 R2=0.0433
+03:29:01 | INFO    |   [6/8] N-HiTS...
+03:29:01 | WARNING |   [N-HiTS] samples=33<50, skip (小样本不稳定)
+03:29:01 | INFO    |   [N-HiTS] 跳过 (未安装或失败)
+03:29:01 | INFO    |   [基线] Croston-SBA: R2=-0.3634 sMAPE=132.9
+03:29:01 | INFO    |   [对比] LightGBM: R2=0.0443
+03:29:01 | INFO    |   [7/8] 两阶段预测...
+03:29:02 | INFO    |   [两阶段] Stage1分类准确率=83.33%, 非零训练样本=25
+03:29:02 | INFO    |         MSE=177488.4919 RMSE=421.2938 MAE=210.1381 R2=-0.0240
+03:29:02 | INFO    |   [图表] 特征重要性(线路在线监测装置) → outputs/figures\特征重要性_线路在线监测装置.png
+03:29:02 | INFO    | 
+03:29:02 | INFO    | [2/8] 处理 一体化电源系统 (一体化电源系统)...
+03:29:02 | INFO    |   [Spearman因子选择] 一体化电源系统: top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+03:29:02 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_feat=13维, 训练=69月
+03:29:02 | DEBUG   |   训练集: 69月, 测试集: 12月
+03:29:02 | INFO    |   [3/8] 模型一: CatBoost...
+03:29:02 | INFO    |         MSE=4.7412 RMSE=2.1774 MAE=1.5052 R2=0.2337
+03:29:02 | INFO    |   [Baseline] NaiveSeasonal: R2=-0.6835
+03:29:02 | INFO    |   [Baseline] Persistence: R2=-0.2525
+03:29:02 | INFO    |   [Baseline] SARIMA: R2=-0.7632
+03:29:02 | INFO    |   [5/8] Conditional-CatBoost...
+03:29:03 | INFO    |         MSE=4.4955 RMSE=2.1203 MAE=1.4737 R2=0.2735
+03:29:03 | INFO    |   [6/8] N-HiTS...
+03:29:03 | WARNING |   [N-HiTS] samples=33<50, skip (小样本不稳定)
+03:29:03 | INFO    |   [N-HiTS] 跳过 (未安装或失败)
+03:29:03 | INFO    |   [基线] Croston-SBA: R2=-0.7657 sMAPE=125.5
+03:29:04 | INFO    |   [对比] LightGBM: R2=0.3986
+03:29:04 | INFO    |   [7/8] 两阶段预测...
+03:29:04 | INFO    |   [两阶段] Stage1分类准确率=83.33%, 非零训练样本=24
+03:29:04 | INFO    |         MSE=4.7076 RMSE=2.1697 MAE=1.5203 R2=0.2392
+03:29:05 | INFO    |   [图表] 特征重要性(一体化电源系统) → outputs/figures\特征重要性_一体化电源系统.png
+03:29:05 | INFO    | 
+03:29:05 | INFO    | [2/8] 处理 变电在线监测装置 (变电在线监测装置)...
+03:29:05 | INFO    |   [Spearman因子选择] 变电在线监测装置: top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+03:29:05 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_feat=13维, 训练=69月
+03:29:05 | DEBUG   |   训练集: 69月, 测试集: 12月
+03:29:05 | INFO    |   [3/8] 模型一: CatBoost...
+03:29:05 | INFO    |         MSE=124.0736 RMSE=11.1388 MAE=5.6833 R2=0.1121
+03:29:05 | INFO    |   [Baseline] NaiveSeasonal: R2=-0.3179
+03:29:05 | INFO    |   [Baseline] Persistence: R2=-0.2100
+03:29:05 | INFO    |   [Baseline] SARIMA: R2=-0.1095
+03:29:05 | INFO    |   [5/8] Conditional-CatBoost...
+03:29:06 | INFO    |         MSE=121.7359 RMSE=11.0334 MAE=5.5881 R2=0.1289
+03:29:06 | INFO    |   [6/8] N-HiTS...
+03:29:06 | WARNING |   [N-HiTS] samples=33<50, skip (小样本不稳定)
+03:29:06 | INFO    |   [N-HiTS] 跳过 (未安装或失败)
+03:29:06 | INFO    |   [基线] Croston-SBA: R2=-0.2957 sMAPE=122.3
+03:29:06 | INFO    |   [对比] LightGBM: R2=0.0974
+03:29:06 | INFO    |   [7/8] 两阶段预测...
+03:29:07 | INFO    |   [两阶段] Stage1分类准确率=91.67%, 非零训练样本=23
+03:29:07 | INFO    |         MSE=124.6207 RMSE=11.1634 MAE=5.8483 R2=0.1082
+03:29:07 | INFO    |   [图表] 特征重要性(变电在线监测装置) → outputs/figures\特征重要性_变电在线监测装置.png
+03:29:07 | INFO    | 
+03:29:07 | INFO    | [2/8] 处理 端子箱 (端子箱)...
+03:29:07 | INFO    |   [Spearman因子选择] 端子箱: top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+03:29:07 | INFO    |   [特征工程] top4=['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids'], n_feat=13维, 训练=69月
+03:29:07 | DEBUG   |   训练集: 69月, 测试集: 12月
+03:29:07 | INFO    |   [3/8] 模型一: CatBoost...
+03:29:08 | INFO    |         MSE=9.0080 RMSE=3.0013 MAE=1.4436 R2=0.1115
+03:29:08 | INFO    |   [Baseline] NaiveSeasonal: R2=-44.1233
+03:29:08 | INFO    |   [Baseline] Persistence: R2=-0.0685
+03:29:09 | INFO    |   [Baseline] SARIMA: R2=-93.2558
+03:29:09 | INFO    |   [5/8] Conditional-CatBoost...
+03:29:10 | INFO    |         MSE=8.9977 RMSE=2.9996 MAE=1.4466 R2=0.1126
+03:29:10 | INFO    |   [6/8] N-HiTS...
+03:29:10 | WARNING |   [N-HiTS] samples=33<50, skip (小样本不稳定)
+03:29:10 | INFO    |   [N-HiTS] 跳过 (未安装或失败)
+03:29:10 | INFO    |   [基线] Croston-SBA: R2=0.0351 sMAPE=129.4
+03:29:10 | INFO    |   [对比] LightGBM: R2=0.2956
+03:29:10 | INFO    |   [7/8] 两阶段预测...
+03:29:11 | INFO    |   [两阶段] Stage1分类准确率=50.00%, 非零训练样本=23
+03:29:11 | INFO    |         MSE=9.2250 RMSE=3.0373 MAE=1.5413 R2=0.0901
+03:29:12 | INFO    |   [图表] 特征重要性(端子箱) → outputs/figures\特征重要性_端子箱.png
+03:29:12 | INFO    | 
+03:29:12 | INFO    | [8/8] 汇总评估与可视化...
+03:29:12 | INFO    | 
+03:29:12 | INFO    | ========================================================================================================================
+03:29:12 | INFO    | 评估指标汇总表
+03:29:12 | INFO    | ========================================================================================================================
+03:29:12 | INFO    | 物资               模型                        MSE       RMSE    sMAPE     MASE       R2
+03:29:12 | INFO    | ----------------------------------------------------------------------------------------------------------------------------------
+03:29:12 | INFO    | 火灾报警系统           CatBoost                 9.89       3.15   135.4%   0.447   0.058
+03:29:12 | INFO    |                  NaiveSeasonal           10.17       3.19   103.6%   0.492   0.032
+03:29:12 | INFO    |                  Persistence             10.50       3.24   141.2%   0.671   0.000
+03:29:12 | INFO    |                  SARIMA                   8.70       2.95   140.3%   0.427   0.171
+03:29:12 | INFO    |                  Croston-SBA             14.64       3.83   133.8%   0.579  -0.395
+03:29:12 | INFO    |                  CondCatBoost             9.90       3.15   135.4%   0.447   0.057
+03:29:12 | INFO    |                  LightGBM                 9.92       3.15   135.5%   0.447   0.055
+03:29:12 | INFO    |                  TwoStage                10.19       3.19   135.6%   0.463   0.029
+03:29:12 | INFO    | ----------------------------------------------------------------------------------------------------------------------------------
+03:29:12 | INFO    | 线路在线监测装置         CatBoost            166011.76     407.45   125.0%   0.421   0.042
+03:29:12 | INFO    |                  NaiveSeasonal       237541.25     487.38   152.7%   0.582  -0.370
+03:29:12 | INFO    |                  Persistence         233933.17     483.67   187.8%   0.556  -0.350
+03:29:12 | INFO    |                  SARIMA              233530.42     483.25   192.8%   0.579  -0.347
+03:29:12 | INFO    |                  Croston-SBA         236324.47     486.13   132.9%   0.568  -0.363
+03:29:12 | INFO    |                  CondCatBoost        165834.68     407.23   124.9%   0.420   0.043
+03:29:12 | INFO    |                  LightGBM            165651.62     407.00   124.9%   0.420   0.044
+03:29:12 | INFO    |                  TwoStage            177488.49     421.29   130.5%   0.462  -0.024
+03:29:12 | INFO    | ----------------------------------------------------------------------------------------------------------------------------------
+03:29:12 | INFO    | 一体化电源系统          CatBoost                 4.74       2.18   113.1%   0.436   0.234
+03:29:12 | INFO    |                  NaiveSeasonal           10.42       3.23   143.2%   0.700  -0.683
+03:29:12 | INFO    |                  Persistence              7.75       2.78   143.5%   0.603  -0.253
+03:29:12 | INFO    |                  SARIMA                  10.91       3.30   161.3%   0.742  -0.763
+03:29:12 | INFO    |                  Croston-SBA             10.93       3.31   125.5%   0.651  -0.766
+03:29:12 | INFO    |                  CondCatBoost             4.50       2.12   112.5%   0.427   0.274
+03:29:12 | INFO    |                  LightGBM                 3.72       1.93   103.5%   0.380   0.399
+03:29:12 | INFO    |                  TwoStage                 4.71       2.17   112.3%   0.440   0.239
+03:29:12 | INFO    | ----------------------------------------------------------------------------------------------------------------------------------
+03:29:12 | INFO    | 变电在线监测装置         CatBoost               124.07      11.14   132.7%   0.679   0.112
+03:29:12 | INFO    |                  NaiveSeasonal          184.17      13.57   147.5%   1.036  -0.318
+03:29:12 | INFO    |                  Persistence            169.08      13.00   144.1%   0.747  -0.210
+03:29:12 | INFO    |                  SARIMA                 155.04      12.45   137.5%   0.934  -0.110
+03:29:12 | INFO    |                  Croston-SBA            181.06      13.46   122.3%   0.782  -0.296
+03:29:12 | INFO    |                  CondCatBoost           121.74      11.03   130.6%   0.668   0.129
+03:29:12 | INFO    |                  LightGBM               126.13      11.23   132.9%   0.671   0.097
+03:29:12 | INFO    |                  TwoStage               124.62      11.16   133.2%   0.699   0.108
+03:29:12 | INFO    | ----------------------------------------------------------------------------------------------------------------------------------
+03:29:12 | INFO    | 端子箱              CatBoost                 9.01       3.00   115.0%   0.662   0.112
+03:29:12 | INFO    |                  NaiveSeasonal          457.50      21.39   154.7%   3.667 -44.123
+03:29:12 | INFO    |                  Persistence             10.83       3.29   119.7%   0.764  -0.069
+03:29:12 | INFO    |                  SARIMA                 955.65      30.91   160.2%   5.587 -93.256
+03:29:12 | INFO    |                  Croston-SBA              9.78       3.13   129.4%   0.875   0.035
+03:29:12 | INFO    |                  CondCatBoost             9.00       3.00   114.6%   0.663   0.113
+03:29:12 | INFO    |                  LightGBM                 7.14       2.67   113.0%   0.725   0.296
+03:29:12 | INFO    |                  TwoStage                 9.22       3.04   118.0%   0.706   0.090
+03:29:12 | INFO    | ----------------------------------------------------------------------------------------------------------------------------------
+03:29:12 | INFO    | 
+03:29:12 | INFO    |   [图表] 预测对比图(火灾报警系统) → outputs/figures\预测对比_火灾报警系统.png
+03:29:12 | INFO    |   [图表] 预测对比图(线路在线监测装置) → outputs/figures\预测对比_线路在线监测装置.png
+03:29:13 | INFO    |   [图表] 预测对比图(一体化电源系统) → outputs/figures\预测对比_一体化电源系统.png
+03:29:13 | INFO    |   [图表] 预测对比图(变电在线监测装置) → outputs/figures\预测对比_变电在线监测装置.png
+03:29:13 | INFO    |   [图表] 预测对比图(端子箱) → outputs/figures\预测对比_端子箱.png
+03:29:15 | INFO    |   [图表] 指标对比图 → outputs/figures\指标对比图.png
+03:29:15 | INFO    | 
+03:29:15 | INFO    | ======================================================================
+03:29:15 | INFO    |   模型性能排序 (按R^2)
+03:29:15 | INFO    | ======================================================================
+03:29:15 | INFO    |   火灾报警系统: [1st] SARIMA (R^2=0.1713)  [2nd] CatBoost (R^2=0.0578)  [3rd] CondCatBoost (R^2=0.0567)
+03:29:15 | INFO    |   线路在线监测装置: [1st] LightGBM (R^2=0.0443)  [2nd] CondCatBoost (R^2=0.0433)  [3rd] CatBoost (R^2=0.0422)
+03:29:15 | INFO    |   一体化电源系统: [1st] LightGBM (R^2=0.3986)  [2nd] CondCatBoost (R^2=0.2735)  [3rd] TwoStage (R^2=0.2392)
+03:29:15 | INFO    |   变电在线监测装置: [1st] CondCatBoost (R^2=0.1289)  [2nd] CatBoost (R^2=0.1121)  [3rd] TwoStage (R^2=0.1082)
+03:29:15 | INFO    |   端子箱: [1st] LightGBM (R^2=0.2956)  [2nd] CondCatBoost (R^2=0.1126)  [3rd] CatBoost (R^2=0.1115)
+03:29:15 | INFO    | 
+03:29:15 | INFO    | 所有图表已保存至: C:\Users\董文涛\PycharmProjects\vmd-catboost\outputs\figures/
+03:29:15 | INFO    | 日志文件: C:\Users\董文涛\PycharmProjects\vmd-catboost\outputs\logs\main_20260708_032855.log
+03:29:15 | INFO    | 完成!
