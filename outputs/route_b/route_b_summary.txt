@@ -1,0 +1,18 @@
+Route B Final Summary
+================================================================================
+Features: 5 shared + 8 self-lag + 3 global-lag1 + 4 cooc-lag1 + 2 seasonal = 22
+All cross-material features use t-1 (lag1) — zero data leakage
+
+Route A Mean R2: 0.2729 | Route B Mean R2: 0.3284 | Delta: +0.0556
+Route B wins: 7/10
+
+  交流避雷器                          RouteA=0.2982 RouteB=0.3471 Delta=+0.0489
+  电容式电压互感器                       RouteA=0.4031 RouteB=0.4805 Delta=+0.0774
+  交流支柱绝缘子                        RouteA=0.3495 RouteB=0.3796 Delta=+0.0301
+  断路器保护                          RouteA=0.4912 RouteB=0.4255 Delta=-0.0657
+  电抗器保护                          RouteA=-0.1007 RouteB=0.0118 Delta=+0.1125
+  线路保护                           RouteA=0.4999 RouteB=0.4362 Delta=-0.0637
+  10kV变压器                        RouteA=0.5333 RouteB=0.4582 Delta=-0.0751
+  变压器保护                          RouteA=0.2365 RouteB=0.2723 Delta=+0.0358
+  母线保护                           RouteA=0.4042 RouteB=0.4109 Delta=+0.0067
+  500kVGIS组合电器                   RouteA=-0.3865 RouteB=0.0622 Delta=+0.4487

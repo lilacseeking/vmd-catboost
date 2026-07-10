@@ -1,0 +1,111 @@
+22:09:50 | INFO    | ======================================================================
+22:09:50 | INFO    |   PIPELINE: Route A: 10种高密度物资 LightGBM Optuna 独立优化
+22:09:50 | INFO    |   14-dim self-lag features, zero data leakage, 100 trials per material
+22:09:50 | INFO    |   日志文件: D:\Users\dell\PycharmProjects\vmd-catboost\scripts\..\outputs\logs\RouteA_20260709_220950.log
+22:09:50 | INFO    | ======================================================================
+22:09:50 | INFO    | 
+22:09:50 | INFO    | [Step 1] 数据加载
+22:09:50 | INFO    |        10种物资 + 6维共享特征 + 8维自回归特征
+22:09:50 | INFO    |        - 共享特征: ['项目数量', 'transformer_bids', 'monthly_bid_count', 'uhv_bids', 'has_batch', 'digital_bids'] (6维) | Train=(62, 6) Test=(12, 6)
+22:09:50 | INFO    |        物资清单
+22:09:50 | INFO    |        -----------------------------------------------------------------------------------
+22:09:50 | INFO    |        AC_Arrester         | 交流避雷器        | 避雷器/绝缘子  | 39       | 11      | 63%    | 92%  
+22:09:50 | INFO    |        CVT                 | 电容式电压互感器     | 其他       | 39       | 11      | 63%    | 92%  
+22:09:50 | INFO    |        Post_Insulator      | 交流支柱绝缘子      | 避雷器/绝缘子  | 39       | 9       | 63%    | 75%  
+22:09:50 | INFO    |        Breaker_Protect     | 断路器保护        | 断路器/组合电器 | 38       | 10      | 61%    | 83%  
+22:09:50 | INFO    |        Reactor_Protect     | 电抗器保护        | 保护/监控    | 38       | 10      | 61%    | 83%  
+22:09:50 | INFO    |        Line_Protect        | 线路保护         | 保护/监控    | 37       | 10      | 60%    | 83%  
+22:09:50 | INFO    |        T10kV               | 10kV变压器      | 变压器      | 37       | 10      | 60%    | 83%  
+22:09:50 | INFO    |        Transformer_Protect | 变压器保护        | 变压器      | 37       | 10      | 60%    | 83%  
+22:09:50 | INFO    |        Busbar_Protect      | 母线保护         | 保护/监控    | 37       | 10      | 60%    | 83%  
+22:09:50 | INFO    |        GIS_500kV           | 500kVGIS组合电器 | 开关柜/环网柜  | 36       | 11      | 58%    | 92%  
+22:09:50 | INFO    |        -----------------------------------------------------------------------------------
+22:09:50 | INFO    |        - 平均训练集密度: 60.8% (vs 之前的19% — 提升3.2倍)
+22:09:50 | INFO    |   [Step 1] OK (0.9s) | 10/10 materials loaded, train density=61%
+22:09:50 | DEBUG   |        = 10/10 materials loaded, train density=61%
+22:09:50 | INFO    | 
+22:09:50 | INFO    | [Step 2] 特征工程
+22:09:50 | INFO    |        构建14维零泄露特征矩阵 (6 shared + 8 self-lag)
+22:09:50 | INFO    |        - 特征结构: [lag1,lag2,lag3,lag6,lag12,roll3m,roll6m,gap] × 自身需求
+22:09:50 | INFO    |        - 数据泄露检查: PASS — 所有特征仅使用 t-1 之前的历史数据
+22:09:50 | INFO    |        - 验证: lag1[i] == y[i-1] for all i>0: FAIL
+22:09:50 | INFO    |   [Step 2] OK (0.0s) | 14-dim feature matrices built for 10 materials
+22:09:50 | DEBUG   |        = 14-dim feature matrices built for 10 materials
+22:09:50 | INFO    | 
+22:09:50 | INFO    | [Step 3] Optuna超参数搜索
+22:09:50 | INFO    |        100 trials per material, holdout validation (last 12 months of train)
+22:09:54 | DEBUG   |          AC_Arrester: searching 100 trials...
+22:10:03 | INFO    |        [AC_Arrester] Default=0.1805 | Optuna=0.2982 | Delta=+0.1177 | Seas=0.0502 | n_train=39 | params=colsample_bytree=0.64, learning_rate=0.053, max_depth=2, min_child_samples=3, min_split_gain=0.013, n_estimators=329, num_leaves=74, reg_alpha=0.41, reg_lambda=0.023, subsample=0.51
+22:10:03 | DEBUG   |          CVT: searching 100 trials...
+22:10:13 | INFO    |        [CVT] Default=0.3593 | Optuna=0.4031 | Delta=+0.0438 | Seas=-2.1934 | n_train=39 | params=colsample_bytree=0.67, learning_rate=0.042, max_depth=3, min_child_samples=7, min_split_gain=0.0025, n_estimators=375, num_leaves=35, reg_alpha=0.3, reg_lambda=0.024, subsample=0.53
+22:10:13 | DEBUG   |          Post_Insulator: searching 100 trials...
+22:10:23 | INFO    |        [Post_Insulator] Default=0.3435 | Optuna=0.3495 | Delta=+0.0060 | Seas=-1.5958 | n_train=39 | params=colsample_bytree=0.61, learning_rate=0.061, max_depth=6, min_child_samples=9, min_split_gain=0.0066, n_estimators=222, num_leaves=72, reg_alpha=0.0059, reg_lambda=0.15, subsample=0.63
+22:10:23 | DEBUG   |          Breaker_Protect: searching 100 trials...
+22:10:29 | INFO    |        [Breaker_Protect] Default=0.5927 | Optuna=0.4912 | Delta=-0.1015 | Seas=-0.0988 | n_train=38 | params=colsample_bytree=0.6, learning_rate=0.044, max_depth=5, min_child_samples=11, min_split_gain=0.067, n_estimators=400, num_leaves=76, reg_alpha=0.19, reg_lambda=0.03, subsample=0.6
+22:10:29 | DEBUG   |          Reactor_Protect: searching 100 trials...
+22:10:39 | INFO    |        [Reactor_Protect] Default=-0.1144 | Optuna=-0.1007 | Delta=+0.0137 | Seas=-2.9457 | n_train=38 | params=colsample_bytree=0.53, learning_rate=0.017, max_depth=2, min_child_samples=9, min_split_gain=0.0041, n_estimators=383, num_leaves=57, reg_alpha=0.043, reg_lambda=0.39, subsample=0.92
+22:10:39 | DEBUG   |          Line_Protect: searching 100 trials...
+22:10:47 | INFO    |        [Line_Protect] Default=0.3062 | Optuna=0.4999 | Delta=+0.1937 | Seas=0.0913 | n_train=37 | params=colsample_bytree=0.84, learning_rate=0.1, max_depth=4, min_child_samples=8, min_split_gain=0.0025, n_estimators=359, num_leaves=15, reg_alpha=0.13, reg_lambda=0.033, subsample=0.67
+22:10:47 | DEBUG   |          T10kV: searching 100 trials...
+22:10:55 | INFO    |        [T10kV] Default=0.4582 | Optuna=0.5333 | Delta=+0.0751 | Seas=-1.1466 | n_train=37 | params=colsample_bytree=0.76, learning_rate=0.092, max_depth=2, min_child_samples=10, min_split_gain=0.026, n_estimators=293, num_leaves=29, reg_alpha=0.031, reg_lambda=0.15, subsample=0.89
+22:10:55 | DEBUG   |          Transformer_Protect: searching 100 trials...
+22:11:03 | INFO    |        [Transformer_Protect] Default=0.2230 | Optuna=0.2365 | Delta=+0.0135 | Seas=0.3408 | n_train=37 | params=colsample_bytree=0.99, learning_rate=0.033, max_depth=5, min_child_samples=2, min_split_gain=0.49, n_estimators=394, num_leaves=49, reg_alpha=4.8, reg_lambda=4.8, subsample=0.63
+22:11:03 | DEBUG   |          Busbar_Protect: searching 100 trials...
+22:11:12 | INFO    |        [Busbar_Protect] Default=0.3469 | Optuna=0.4042 | Delta=+0.0573 | Seas=0.4178 | n_train=37 | params=colsample_bytree=0.84, learning_rate=0.082, max_depth=4, min_child_samples=13, min_split_gain=0.079, n_estimators=383, num_leaves=36, reg_alpha=0.0078, reg_lambda=2.8, subsample=0.53
+22:11:12 | DEBUG   |          GIS_500kV: searching 100 trials...
+22:11:19 | INFO    |        [GIS_500kV] Default=0.0057 | Optuna=-0.3865 | Delta=-0.3923 | Seas=-1.8022 | n_train=36 | params=colsample_bytree=0.97, learning_rate=0.064, max_depth=2, min_child_samples=12, min_split_gain=0.043, n_estimators=303, num_leaves=44, reg_alpha=0.82, reg_lambda=0.25, subsample=0.7
+22:11:19 | INFO    |   [Step 3] OK (88.4s) | 10/10 Optuna searches complete
+22:11:19 | DEBUG   |        = 10/10 Optuna searches complete
+22:11:19 | INFO    | 
+22:11:19 | INFO    | [Step 4] 汇总对比
+22:11:19 | INFO    |        Optuna vs Default vs NaiveSeasonal
+22:11:19 | INFO    |        结果汇总
+22:11:19 | INFO    |        --------------------------------------------------------------------
+22:11:19 | INFO    |        AC_Arrester      | 避雷器/绝缘子  | 0.1805  | 0.2982+  | 0.0502  | +0.1177
+22:11:19 | INFO    |        CVT              | 其他       | 0.3593  | 0.4031+  | -2.1934 | +0.0438
+22:11:19 | INFO    |        Post_Insulator   | 避雷器/绝缘子  | 0.3435  | 0.3495+  | -1.5958 | +0.0060
+22:11:19 | INFO    |        Breaker_Protect  | 断路器/组合电器 | 0.5927  | 0.4912+  | -0.0988 | -0.1015
+22:11:19 | INFO    |        Reactor_Protect  | 保护/监控    | -0.1144 | -0.1007+ | -2.9457 | +0.0137
+22:11:19 | INFO    |        Line_Protect     | 保护/监控    | 0.3062  | 0.4999+  | 0.0913  | +0.1937
+22:11:19 | INFO    |        T10kV            | 变压器      | 0.4582  | 0.5333+  | -1.1466 | +0.0751
+22:11:19 | INFO    |        Transformer_Prot | 变压器      | 0.2230  | 0.2365-  | 0.3408  | +0.0135
+22:11:19 | INFO    |        Busbar_Protect   | 保护/监控    | 0.3469  | 0.4042-  | 0.4178  | +0.0573
+22:11:19 | INFO    |        GIS_500kV        | 开关柜/环网柜  | 0.0057  | -0.3865+ | -1.8022 | -0.3922
+22:11:19 | INFO    |        --------------------------------------------------------------------
+22:11:19 | INFO    |        - Mean Optuna R2: 0.2729 | Mean Default: 0.2702 | Median Optuna: 0.3763
+22:11:19 | INFO    |        - Optuna > Default: 8/10 | Optuna > Seasonal: 8/10 | Optuna > Prev Best(0.171): 8/10
+22:11:19 | INFO    |   [Step 4] OK (0.0s) | Optuna wins: 8/10 vs Default, 8/10 vs Seasonal
+22:11:19 | DEBUG   |        = Optuna wins: 8/10 vs Default, 8/10 vs Seasonal
+22:11:19 | INFO    | 
+22:11:19 | INFO    | [Step 5] 消融实验: 特征组贡献分析
+22:11:19 | INFO    |        逐步移除外源特征(共享因子/自回归)观察贡献
+22:11:20 | INFO    |        消融: 全部(14D) vs 仅自回归(8D) vs 仅共享(6D)
+22:11:20 | INFO    |        -------------------------------------------------------------------------
+22:11:20 | INFO    |        AC_Arrester      | 0.2982    | 0.2167       | -0.2269        | +0.0815   
+22:11:20 | INFO    |        CVT              | 0.4031    | 0.5942       | -0.0093        | -0.1911   
+22:11:20 | INFO    |        Post_Insulator   | 0.3495    | 0.4818       | -0.4356        | -0.1323   
+22:11:20 | INFO    |        Breaker_Protect  | 0.4912    | 0.4037       | -0.1939        | +0.0875   
+22:11:20 | INFO    |        Reactor_Protect  | -0.1007   | 0.3181       | -1.0521        | -0.4188   
+22:11:20 | INFO    |        Line_Protect     | 0.4999    | 0.2528       | 0.1367         | +0.2471   
+22:11:20 | INFO    |        T10kV            | 0.5333    | 0.5652       | -0.0477        | -0.0319   
+22:11:20 | INFO    |        Transformer_Prot | 0.2365    | 0.0187       | 0.0286         | +0.2178   
+22:11:20 | INFO    |        Busbar_Protect   | 0.4042    | 0.2229       | 0.2467         | +0.1813   
+22:11:20 | INFO    |        GIS_500kV        | -0.3865   | -0.3049      | -0.2287        | -0.0816   
+22:11:20 | INFO    |        -------------------------------------------------------------------------
+22:11:20 | INFO    |        - 共享因子的平均边际贡献: -0.0040 (5/10 为正)
+22:11:20 | INFO    |   [Step 5] OK (1.2s) | 消融实验完成
+22:11:20 | DEBUG   |        = 消融实验完成
+22:11:20 | INFO    | 
+22:11:20 | INFO    | [Step 6] 可视化 + 结果导出
+22:11:20 | INFO    |        6张图 + JSON + 日志
+22:11:21 | INFO    |        - fig1_r2.png — R2对比柱状图
+22:11:21 | INFO    |        - fig2_gain.png — Optuna提升量
+22:11:22 | INFO    |        - fig3_top3.png — Top3预测vs实际
+22:11:22 | INFO    |        - JSON: D:\Users\dell\PycharmProjects\vmd-catboost\scripts\..\outputs\route_a\route_a_results.json
+22:11:22 | INFO    |   [Step 6] OK (1.6s) | 6 charts + JSON saved to D:\Users\dell\PycharmProjects\vmd-catboost\scripts\..\outputs\route_a
+22:11:22 | DEBUG   |        = 6 charts + JSON saved to D:\Users\dell\PycharmProjects\vmd-catboost\scripts\..\outputs\route_a
+22:11:22 | INFO    | 
+22:11:22 | INFO    | ======================================================================
+22:11:22 | INFO    |   PIPELINE COMPLETE (92s)
+22:11:22 | INFO    |   Mean R2=0.2729, wins Default=8/10, wins Previous=8/10
+22:11:22 | INFO    | ======================================================================

@@ -1,0 +1,79 @@
+23:36:43 | INFO    | ======================================================================
+23:36:43 | INFO    |   PIPELINE: Jackknife+ Conformal Prediction (Leave-One-Out)
+23:36:43 | INFO    |   62-fold LOOCV calibration — 62 residuals per material for stable quantile estimation
+23:36:43 | INFO    |   日志文件: D:\Users\dell\PycharmProjects\vmd-catboost\scripts\..\outputs\logs\Jackknife_20260709_233643.log
+23:36:43 | INFO    | ======================================================================
+23:36:43 | INFO    | 
+23:36:43 | INFO    | [Step 1] Data Loading
+23:36:43 | INFO    |        10 materials + 14-dim zero-leakage features
+23:36:43 | INFO    |        -   AC_Arrester            → 交流避雷器 | nz_train=39/62
+23:36:43 | INFO    |        -   CVT                    → 电容式电压互感器 | nz_train=39/62
+23:36:43 | INFO    |        -   Post_Insulator         → 交流支柱绝缘子 | nz_train=39/62
+23:36:43 | INFO    |        -   Breaker_Protect        → 断路器保护 | nz_train=38/62
+23:36:43 | INFO    |        -   Reactor_Protect        → 电抗器保护 | nz_train=38/62
+23:36:43 | INFO    |        -   Line_Protect           → 线路保护 | nz_train=37/62
+23:36:43 | INFO    |        -   T10kV                  → 10kV变压器 | nz_train=37/62
+23:36:43 | INFO    |        -   Transformer_Protect    → 变压器保护 | nz_train=37/62
+23:36:43 | INFO    |        -   Busbar_Protect         → 母线保护 | nz_train=37/62
+23:36:43 | INFO    |        -   GIS_500kV              → 500kVGIS组合电器 | nz_train=36/62
+23:36:43 | INFO    |   [Step 1] OK (0.5s) | 10 materials loaded
+23:36:43 | DEBUG   |        = 10 materials loaded
+23:36:43 | INFO    | 
+23:36:43 | INFO    | [Step 2] Jackknife+ Calibration
+23:36:43 | INFO    |        Step 2a: Optuna ONCE per material. Step 2b: 62-fold LOOCV with best params
+23:36:50 | DEBUG   |          AC_Arrester: running 62-fold LOOCV...
+23:36:56 | INFO    |        [AC_Arrester] Cov=92% | Width=2578 | Winkler=5862 | R2_pt=0.2803 | inside=11/12
+23:36:59 | DEBUG   |          CVT: running 62-fold LOOCV...
+23:37:09 | INFO    |        [CVT] Cov=100% | Width=231 | Winkler=231 | R2_pt=0.5056 | inside=12/12
+23:37:12 | DEBUG   |          Post_Insulator: running 62-fold LOOCV...
+23:37:16 | INFO    |        [Post_Insulator] Cov=83% | Width=1983 | Winkler=2282 | R2_pt=0.3053 | inside=10/12
+23:37:20 | DEBUG   |          Breaker_Protect: running 62-fold LOOCV...
+23:37:24 | INFO    |        [Breaker_Protect] Cov=92% | Width=66 | Winkler=69 | R2_pt=0.3997 | inside=11/12
+23:37:27 | DEBUG   |          Reactor_Protect: running 62-fold LOOCV...
+23:37:34 | INFO    |        [Reactor_Protect] Cov=92% | Width=32 | Winkler=33 | R2_pt=-0.1242 | inside=11/12
+23:37:37 | DEBUG   |          Line_Protect: running 62-fold LOOCV...
+23:37:43 | INFO    |        [Line_Protect] Cov=75% | Width=163 | Winkler=700 | R2_pt=0.4612 | inside=9/12
+23:37:46 | DEBUG   |          T10kV: running 62-fold LOOCV...
+23:37:52 | INFO    |        [T10kV] Cov=75% | Width=77 | Winkler=117 | R2_pt=0.5083 | inside=9/12
+23:37:55 | DEBUG   |          Transformer_Protect: running 62-fold LOOCV...
+23:38:05 | INFO    |        [Transformer_Protect] Cov=83% | Width=73 | Winkler=361 | R2_pt=0.2615 | inside=10/12
+23:38:09 | DEBUG   |          Busbar_Protect: running 62-fold LOOCV...
+23:38:14 | INFO    |        [Busbar_Protect] Cov=75% | Width=60 | Winkler=149 | R2_pt=0.4054 | inside=9/12
+23:38:17 | DEBUG   |          GIS_500kV: running 62-fold LOOCV...
+23:38:21 | INFO    |        [GIS_500kV] Cov=83% | Width=66 | Winkler=141 | R2_pt=-0.1680 | inside=10/12
+23:38:21 | INFO    |   [Step 2] OK (97.7s) | 62-fold Jackknife+ complete for 10 materials
+23:38:21 | DEBUG   |        = 62-fold Jackknife+ complete for 10 materials
+23:38:21 | INFO    | 
+23:38:21 | INFO    | [Step 3] Comparison
+23:38:21 | INFO    |        Jackknife+ (62 residuals) vs Split (12 residuals) — coverage stability
+23:38:21 | INFO    |        Jackknife+ vs Split Conformal
+23:38:21 | INFO    |        ------------------------------------------------------------------------------------------
+23:38:21 | INFO    |        AC_Arrester      | 92%→92%             | 4819→2578        | 6390→5862          | 0.280    
+23:38:21 | INFO    |        CVT              | 100%→100%           | 258→231          | 258→231            | 0.506    
+23:38:21 | INFO    |        Post_Insulator   | 42%→83%             | 1271→1983        | 4178→2282          | 0.305    
+23:38:21 | INFO    |        Breaker_Protect  | 92%→92%             | 65→66            | 80→69              | 0.400    
+23:38:21 | INFO    |        Reactor_Protect  | 100%→92%            | 42→32            | 42→33              | -0.124   
+23:38:21 | INFO    |        Line_Protect     | 83%→75%             | 177→163          | 910→700            | 0.461    
+23:38:21 | INFO    |        T10kV            | 58%→75%             | 74→77            | 151→117            | 0.508    
+23:38:21 | INFO    |        Transformer_Prot | 83%→83%             | 78→73            | 353→361            | 0.262    
+23:38:21 | INFO    |        Busbar_Protect   | 92%→75%             | 73→60            | 143→149            | 0.405    
+23:38:21 | INFO    |        GIS_500kV        | 75%→83%             | 84→66            | 134→141            | -0.168   
+23:38:21 | INFO    |        ------------------------------------------------------------------------------------------
+23:38:21 | INFO    |        - Coverage: Split=81.7% → Jackknife+=85.0%
+23:38:21 | INFO    |        - Width:    Jackknife+=533
+23:38:21 | INFO    |        - On-target (70%-90%): 6/10 (Split had 3/10)
+23:38:21 | INFO    |   [Step 3] OK (0.0s) | Jackknife+ coverage: 85.0%, on_target: 6/10
+23:38:21 | DEBUG   |        = Jackknife+ coverage: 85.0%, on_target: 6/10
+23:38:21 | INFO    | 
+23:38:21 | INFO    | [Step 4] Charts
+23:38:21 | INFO    |        6 comparison figures
+23:38:24 | INFO    |   [Step 4] OK (2.4s) | 6 charts generated
+23:38:24 | DEBUG   |        = 6 charts generated
+23:38:24 | INFO    | 
+23:38:24 | INFO    | [Step 5] Final Report
+23:38:24 | INFO    |        Jackknife+ complete evaluation
+23:38:24 | INFO    | 
+23:38:24 | INFO    | ======================================================================
+23:38:24 | INFO    |   PIPELINE COMPLETE (101s)
+23:38:24 | INFO    |   JK+ Coverage=85.0%, OnTarget=6/10, BestWinkler=Reactor_Protect(33)
+23:38:24 | INFO    | ======================================================================
