@@ -1,102 +1,97 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## 项目目的
 
-## Project purpose
+配电网物资需求预测模型对比实验。基于国网 ECP2.0 平台采购数据，对多种模型在 5 种物资的月度需求预测任务上进行对比评估，为期刊论文提供实验支撑。
 
-配电网物资需求预测模型对比实验。基于 VMD（变分模态分解）+ CatBoost/LSTM/SVR，对三类核心配电网物资（10KV电缆、柱上变压器、避雷器）进行月度需求预测，对比五种模型架构的性能。
-
-## Commands
+## 命令
 
 ```bash
-# Install dependencies (Python 3.12 required)
 pip install -r requirements.txt
-
-# Run full experiment (all materials × all models)
-python main.py
-
-# Clear matplotlib font cache (if Chinese font rendering breaks)
-rm -rf ~/.matplotlib/fontlist-v330.json
+python main.py                    # 运行全量实验
+python main.py --data data.xlsx   # 指定数据文件
 ```
 
-## Architecture
+## 架构
 
-### Data flow
+### 数据流
 
 ```
-inputs/data/data.xlsx (3 sheets: cable/transformer/arrester, 36 months each)
-  → load_or_generate_data()  →  data_dict[material] = DataFrame
-  → get_top_factors()  →  4 factors per material (hardcoded from Spearman analysis)
-  → preprocess_data()  →  MinMax normalize, split train(0:24)/test(24:36)
-  → 5 model runners  →  inverse_transform  →  metrics + charts
+inputs/data/data.xlsx (5 sheets, 各代表一种物资)
+  → load_or_generate_data()     → data_dict[material] = DataFrame
+  → get_top_factors()           → 每物资 Spearman 动态选择 Top-4 因子
+  → preprocess_data()           → 训练/测试分割 + lag/rolling特征 + 因子缩放
+  → 13 个模型逐一训练评估       → metrics + 图表
 ```
 
-### Five models (single file: `main.py`, 1315 lines, 30 rounds of optimization)
+### 模型清单（13 个，全部在 `main.py` 中）
 
-| # | Model | Function | Core approach |
-|---|-------|----------|---------------|
-| 1 | CatBoost | `run_catboost()` | 4 factors → CatBoostRegressor direct prediction (baseline) |
-| 2 | VMD-CatBoost | `run_vmd_catboost()` | VMD(K=5) → 5 IMFs + 4 factors → CatBoost end-to-end |
-| 3 | VMD-LSTM-CatBoost | `run_vmd_lstm_catboost()` | VMD → residual IMF → MultiFeatureLSTM(5→12) + 4 modal IMFs → SingleFeatureLSTM(1→8) each → CatBoost fusion (9-dim input) |
-| 4 | VMD-LSTM (直接求和) | `run_vmd_lstm_direct_sum()` | VMD → same LSTM structure as model 3 → direct sum (ablation: no CatBoost fusion) |
-| 5 | VMD-SVR | `run_vmd_svr()` | VMD → 5 IMFs → GridSearchCV(SVR) per component → sum (ablation: classical ML instead of CatBoost) |
+| 类别 | 模型 | 函数 | 说明 |
+|------|------|------|------|
+| **核心** | CatBoost | `run_catboost` | TwoStage-CatBoost：两阶段框架 + CatBoost 回归 |
+| **消融** | CatBoost-2S | `run_catboost_2s` | CatBoost 两阶段变体（不同超参数） |
+| **消融** | CondCatBoost | `run_conditional_catboost` | 更强 CatBoost 参数配置 |
+| **对照** | TwoStage | `run_two_stage` | 独立两阶段实现（不依赖 `_two_stage_fit_predict` 框架） |
+| **线性** | Ridge-2S | `run_ridge_2s` | 两阶段 + Ridge 回归（小样本更稳定） |
+| **线性** | ElasticNet-2S | `run_elasticnet_2s` | 两阶段 + ElasticNet（L1+L2 正则化） |
+| **对比** | LightGBM | `run_lightgbm` | 两阶段 + LightGBM（树模型族对比） |
+| **深度** | N-HiTS | `run_nhits` | 多尺度层次化预测（当前因样本 <50 被跳过） |
+| **基线** | NaiveSeasonal | `baseline_naive_seasonal` | 去年同期值 |
+| **基线** | NaiveMean | `baseline_naive_mean` | 历史均值 |
+| **基线** | Persistence | `baseline_persistence` | 最后观测值 |
+| **基线** | SARIMA | `baseline_sarima` | 经典统计模型 |
+| **基线** | Croston-SBA | `run_croston_sba` | 间歇性需求标准方法 |
 
-### Key design decisions
+### 两阶段框架
 
-- **Look-ahead bias prevention**: VMD is applied ONLY on training set (24 months). Test-period IMFs are obtained via **persistence extrapolation** (repeat last training IMF value), not by decomposing the full series. This is critical for publication credibility.
-- **Spearman correlation**: Top-4 factors per material are hardcoded from prior analysis, not computed at runtime. Uses Spearman (not Pearson) because demand-factor relationships may be monotonic but nonlinear.
-- **LSTM small-sample optimization**: Hidden sizes reduced (12/8), high dropout (0.5), full-batch training, early stopping patience=50.
-- **VMD K auto-optimization**: `vmd_optimize_k()` searches K in range(2,7) with frequency ratio threshold=1.5. Per-material alpha: cable=2500, transformer=2500, arrester=2000.
-- **IMF correlation filtering**: `filter_imfs_by_correlation()` removes IMFs with Pearson correlation < 0.1 with the original signal before feeding to downstream models.
-- **Sequence window**: `SEQ_LEN=6` months, `stride=1` for LSTM time-window construction (42 samples from 24-month train).
+核心函数 `_two_stage_fit_predict`：Stage 1 用 CatBoostClassifier 预测某月是否有需求（P），Stage 2 在非零样本上训练回归器预测需求量（Q）。最终预测 ŷ = P × Q。
 
-### LSTM models (R14 optimal config)
+### 评估指标
 
-- `MultiFeatureLSTM`: input_size=5, hidden_size=8, 2-layer, dropout=0.25, double FC
-- `SingleFeatureLSTM`: hidden_size=4, 2-layer, dropout=0.25, double FC
-- Training: Adam(lr=0.002, weight_decay=1e-4), MSELoss, epochs=1000, patience=60, ReduceLROnPlateau scheduler
+MSE、RMSE、MAE、R²、sMAPE、MASE、zero_acc（零值预测准确率）。
 
-### Output
+### 输出
 
-`outputs/figures/`:
-- `prediction_comparison_{material}.png` — per-material prediction vs actual curves for all models
-- `vmd_decomposition_{material}.png` — VMD 5-IMF waveform plots
-- `feature_importance_{material}.png` — feature importance bar chart
-- `metrics_comparison.png` — grouped bar chart (MSE/RMSE/MAE/R²) across all models × materials
-- `metrics_summary.json` — structured evaluation metrics
+`outputs/figures/`：预测对比图、特征重要性、指标对比柱状图、需求曲线
+`outputs/logs/`：时间戳日志
 
-`outputs/logs/`: timestamped log files with full execution trace.
+## 已知关键结论
 
-## Data format
+- **VMD 系列已移除（2026-07-11）**：循环论证 —— ΣIMF ≈ y，用 IMF 预测 y 是方法论错误
+- **Transformer/DLinear/ModernTCN 已移除（2026-07-11）**：74 个月数据对深度学习时序模型差两个数量级
+- **Theta/SES/TSB 已移除（2026-07-11）**：指数平滑族假设随机噪声，ECP 零值来自确定性的批次招标节奏
+- **GP-2S 已移除（2026-07-11）**：36 个 Stage 2 非零样本不足以可靠学习核超参数
+- **LightGBM-pure 已移除（2026-07-11）**：单阶段回归无法处理零膨胀数据，两阶段版已展示正确处理方式
+- 最佳单模型 R² ≈ 0.35-0.66（SGCC 数据，5 种物资）
+- 两阶段框架对大需求物资提升显著（+0.35~+0.47 R²），小需求物资退化
+- Ridge-2S 在极小样本（36 非零月）上有时优于 CatBoost——线性模型的低方差优势
+- ECP 零值不是随机间歇（Croston-SBA R² 全负证明）——是确定性的批次招标节奏
+- 4 个外部因子中 3 个是全局变量（对所有物资相同），模型本质是 fancy 自回归
+- 上游数据存在致命问题 demand_month=公告月（非交货月）和单位未归一化（bidding-ecp-data 项目）
 
-`inputs/data/data.xlsx` — 3 sheets named by Chinese material names. Each sheet has columns (Chinese headers, auto-mapped to English on load):
+## scripts/ 目录
 
-| Column (CN) | Column (EN) | Type |
-|-------------|-------------|------|
-| 日期 | date | datetime (month-start) |
-| 需求量 | demand | float |
-| 负荷增长量(分) | load_growth | float (0-1 normalized) |
-| 工程投资量 | investment | float |
-| 历史需求量 | history_demand | float |
-| 设备进价成本(万元) | equipment_cost | float |
-| 台风(分) | typhoon_count | float (0-1 normalized) |
-| 雷击(分) | lightning_count | float (0-1 normalized) |
-| 暴雨(分) | rainstorm_count | float (0-1 normalized) |
+| 文件 | 用途 |
+|------|------|
+| `batch_event_model.py` | 批次事件三层预测模型（后续方向） |
+| `build_highfreq_data.py` | 高密度物资数据准备 |
+| `compile_investment_data.py` | 投资数据编译 |
+| `conformal_prediction.py` | 共形预测不确定性量化 |
+| `jackknife_conformal.py` | Jackknife+ 共形预测 |
+| `ensemble_analysis.py` | 集成分析 |
+| `visualize_top10.py` | Top-10 物资 EDA 可视化 |
+| `visualize_top8_materials.py` | Top-8 物资 EDA 可视化 |
+| `logger_utils.py` | 日志工具（conformal 系列依赖） |
 
-First run auto-generates simulated data; subsequent runs read the file. If column check fails (stale schema), the file is deleted and regenerated.
+## 清理记录
 
-## Upstream data source
+**2026-07-11**：从 main.py 移除以下模型族（从 2096 行精简至 979 行）：
+- VMD 全系列（循环论证）
+- Transformer 全部基础设施（样本效率不足以支持 self-attention）
+- DLinear/ModernTCN（参数/样本比失衡）
+- Theta/SES/TSB（模型类与确定性批次数据不匹配）
+- LightGBM-pure（单阶段在零膨胀数据上的结构性劣势）
+- GP-2S（核超参数在 36 样本上不可辨识）
+- 旧版 run_catboost（代码重复）
 
-The `bidding-ecp-data` project at `../bidding-ecp-data` provides real procurement data. To connect: export `material_demand_stats` from its SQLite database, map to the 3 target materials, and replace `inputs/data/data.xlsx` with real data.
-
-External factors (investment, load_growth, etc.) are compiled at `inputs/data/jibei_investment_monthly.xlsx` (generated by `scripts/compile_investment_data.py`). The upstream `bidding-ecp-data/src/fetch_external_factors.py` fetches STF (季节时间因子), RMPF (原材料价格因子 via SHFE), and IEDF (工业用电需求因子 via 国家能源局) using AKShare.
-
-## Optimization history
-
-`ITERATIONS.md` documents 30 rounds of iterative improvement. Best result (R14): VMD-LSTM-CatBoost average R²=0.500 vs CatBoost baseline 0.454. Key improvements: 30% zero-value reduction in data + 80% arrester dual-peak pattern + VMD K auto-optimization.
-
-## Paper context
-
-The `../bidding-ecp-data/book/` directory contains reference papers and the research design document (研究方案讨论纪要.md).
-
-**当前方法已确认不可行。** 全部模型（CatBoost, VMD-LSTM-CatBoost, Croston-TSB-LGB, LGB Direct Multi-Step）在5种物资上均无法稳定超越 Naive-Seasonal 基线。根因分析见 `bidding-ecp-data/reports/预测失败根因分析与改进方案.md`——74个月中仅27个批次事件，这不是时间序列问题，是离散事件预测问题。正确方向：批次事件三层预测架构（When → What → How Much）。
+同时删除 scripts/ 下 7 个 Route ABC 实验脚本，其核心发现记录在 reports/ 中。

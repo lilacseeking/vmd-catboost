@@ -234,3 +234,23 @@ main() L1714-1715:
 **新增 2 个代码级 Bug**: run_catboost 双重定义（影响当前运行——"CatBoost"标签实际是 TwoStage），VMD/Transformer 超参字典键名不匹配（潜伏 Bug，当前被禁用不触发）。
 
 **架构层面显著改善**: VMD 循环论证已禁用、Croston-SBA 和 LightGBM 已加入、统一 TwoStage 框架。但核心方法论问题（时间序列 vs 离散事件预测）仍存在——详见 DESIGN_AUDIT_REPORT.md。
+
+---
+
+## 九、2026-07-11 代码清理
+
+从 main.py 移除以下模型族（2096 → 979 行，精简 53%）。每条删除基于"模型架构假设与项目数据特征的根本性不匹配"：
+
+| 移除内容 | 理由 |
+|---------|------|
+| VMD 全部函数（含 run_vmd_catboost/transformer/SVR） | 循环论证：ΣIMF≈y，用 IMF 预测 y 等于用答案反推答案 |
+| Transformer 基础设施（PositionalEncoding/ProbSparseAttention/MultiFeatureTransformer 等） | 自注意力在 45 训练窗口下无法学习有意义的注意力模式（576 pairwise 关系 vs 45 样本） |
+| DLinear/DLinear-2S | lookback=24 时趋势/季节分量在确定性零值模式下退化，参数/样本比 0.5:1 |
+| ModernTCN/ModernTCN-2S | 参数/样本比 >2:1，教科书级过拟合 |
+| Theta/SES | 模型假设"信号+i.i.d.噪声"，ECP 零值是确定性批次节奏（"事件+空白"） |
+| TSB | 与 Croston-SBA 同族，对确定性零值问题的回答必然一致，不增加信息 |
+| LightGBM-pure | 单阶段回归在零膨胀数据上的结构性劣势；正确消融是 CatBoost vs CatBoost-2S |
+| GP-2S | 核超参数在 36 个 Stage 2 样本上不可辨识（Rasmussen & Williams, 2006） |
+| 旧版 run_catboost（L776 第一定义） | 被 L1505 第二定义覆盖，死代码 |
+
+同时删除 `scripts/` 下 7 个独立实验脚本（route_a/b/c 系列 + run_new_models.py），其核心发现已记录在 reports/ 中。

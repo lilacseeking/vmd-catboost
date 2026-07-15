@@ -1,6 +1,8 @@
 """
 main.py -- 电力物资需求量预测 (期刊论文)
-模型: CatBoost / Conditional-CatBoost / N-HiTS / TwoStage + NaiveSeasonal/Persistence/SARIMA
+模型: CatBoost / CatBoost-2S / CondCatBoost / TwoStage / Ridge-2S / ElasticNet-2S / LightGBM / N-HiTS
+基线: NaiveSeasonal / NaiveMean / Persistence / SARIMA / Chronos / Croston-SBA
+指标: MSE / RMSE / MAE / R^2 / sMAPE / MASE / WRMSSE / sCRPS(Chronos)
 物资: Top5采购频率最高 (从ECP数据库自动选择)
 运行: python main.py [--data data.xlsx]
 """
@@ -104,23 +106,114 @@ MATERIAL_LABELS = {}
 FACTOR_NAMES = ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
 FACTOR_LABELS = {'project_count': '项目数量(同源)', 'transformer_bids': '输变电批次数',
                  'monthly_bid_count': '当月公告总数', 'uhv_bids': '特高压批次数'}
-VMD_K = 5
-VMD_ALPHA = 2000
-VMD_ALPHA_MAP = {'ac_arrester': 4000, 'cvt': 2000, 'post_insulator': 3000}
-TF_MULTI_DIM = {'ac_arrester': 32, 'cvt': 24, 'post_insulator': 32}
-TF_NLAYERS = {'ac_arrester': 2, 'cvt': 2, 'post_insulator': 2}
-TF_NHEAD = {'ac_arrester': 4, 'cvt': 4, 'post_insulator': 4}
-TF_LR = {'ac_arrester': 0.001, 'cvt': 0.0005, 'post_insulator': 0.001}
-TF_EPOCHS = {'ac_arrester': 1000, 'cvt': 800, 'post_insulator': 800}
-TF_SINGLE_DIM = {'ac_arrester': 16, 'cvt': 16, 'post_insulator': 16}
-TF_DROPOUT = {'ac_arrester': 0.3, 'cvt': 0.25, 'post_insulator': 0.3}
-TF_SEQ_LEN = {'ac_arrester': 15, 'cvt': 12, 'post_insulator': 12}
-VMD_AUTO_K = True  # False=固定K=3, True=自动优化
-USE_INFORMER = False  # 短序列(12步)标准注意力优于ProbSparse
-SEQ_LEN = 12
-SLIDING_STRIDE = 1  # 滑动窗口步长，seq_len=12 → 36个训练样本
 RANDOM_SEED = 42
 DATA_LOCKED = True  # 严格模式 — 数据由外部手动生成，禁止自动回退
+USE_QUARTER_DUMMIES = False  # 方案A: 行政季度末哑变量。实验确认无显著收益(ΔR²=-0.0046), 已关闭
+
+# ===================== 可取消的实验开关 (设为True启用/False回退) =====================
+USE_EVENT_FEATURES = False   # 实验1: 事件保持特征(SHOS)
+USE_POOLED_TRAINING = False  # 实验2: 相似性聚类池化
+USE_LOG1P_TARGET = False     # 实验3: Y对数变换
+USE_QUANTILE_REGR = False    # 实验4: 分位数回归
+
+# ===================== 0. 每物资超参数配置 =====================
+# 两层字典: HP_DEFAULTS[model_key] = 默认参数; HP_OVERRIDES[model_key][material_substr] = 覆盖值
+# get_hp(model_key, material_name) → 合并后的参数字典。
+# 物资匹配: 在material_name中做子串搜索(find), 第一个命中的覆盖生效。
+# 新增模型: 只需在 HP_DEFAULTS 加一行 + 在 HP_OVERRIDES 加物料特化(可选)
+# 新增物资: 只需在 HP_OVERRIDES 各模型下加该物资的覆盖条目(如需要)
+
+# 注意: HP键名使用 CatBoost/LightGBM 原生参数名, 通过 **hp 直接解包传入
+HP_DEFAULTS = {
+    # -- 共享Stage1分类器 (被 _two_stage_fit_predict 使用) --
+    'stage1_cls':       {'iterations': 600, 'learning_rate': 0.03, 'depth': 5, 'l2_leaf_reg': 5},
+    # -- CatBoost单阶段直接回归 (消融基线) --
+    'catboost_direct':  {'iterations': 1500, 'learning_rate': 0.02, 'depth': 6, 'l2_leaf_reg': 3},
+    # -- CatBoost单阶段×Tweedie损失 (波动数据专项,  复合Poisson-Gamma分布) --
+    'catboost_tweedie': {'iterations': 1500, 'learning_rate': 0.02, 'depth': 6, 'l2_leaf_reg': 3},
+    # -- CatBoost-2S (两阶段×RMSE) --
+    'catboost_2s':      {'iterations': 1500, 'learning_rate': 0.02, 'depth': 6, 'l2_leaf_reg': 3},
+    # -- CondCatBoost (两阶段×更强CatBoost) --
+    'cond_catboost':    {'iterations': 2000, 'learning_rate': 0.015, 'depth': 7, 'l2_leaf_reg': 4},
+    # -- TwoStage独立实现: Stage1分类器 --
+    'twostage_cls':     {'iterations': 800, 'learning_rate': 0.03, 'depth': 5, 'l2_leaf_reg': 5},
+    # -- TwoStage独立实现: Stage2回归器 --
+    'twostage_reg':     {'iterations': 1500, 'learning_rate': 0.02, 'depth': 6, 'l2_leaf_reg': 3},
+    # -- Ridge-2S --
+    'ridge_2s':         {'alphas': [0.01, 0.1, 1.0, 10.0, 100.0]},
+    # -- ElasticNet-2S --
+    'elasticnet_2s':    {'l1_ratio': [0.1, 0.5, 0.7, 0.9, 0.95, 1.0]},
+    # -- LightGBM两阶段 --
+    'lightgbm':         {'n_estimators': 500, 'learning_rate': 0.03, 'max_depth': 5,
+                         'num_leaves': 31, 'reg_alpha': 1, 'reg_lambda': 3},
+    # -- 分位数回归 (实验4: 三alpha训练, 输出中位数+预测区间) --
+    'quantile':         {'iterations': 1500, 'learning_rate': 0.02, 'depth': 6, 'l2_leaf_reg': 3},
+}
+
+HP_OVERRIDES = {
+    'stage1_cls': {
+        # 按物资数据特征调参: 非零月多的物资可用更强分类器, 非零月少的需强正则
+        '交流避雷器':      {'depth': 6, 'iterations': 800},           # ~42非零月, 高区分度
+        '电容式电压互感器':  {'depth': 4, 'iterations': 500, 'l2_leaf_reg': 6},  # ~38非零月
+        '交流支柱绝缘子':    {'depth': 4, 'iterations': 500, 'l2_leaf_reg': 6},  # ~36非零月, CV高
+        '断路器保护':       {'depth': 3, 'iterations': 400, 'l2_leaf_reg': 8},  # ~36非零月, 极高CV
+        '电抗器保护':       {'depth': 4, 'iterations': 500, 'l2_leaf_reg': 6},  # ~40非零月
+    },
+    'catboost_2s': {
+        '交流避雷器':      {'depth': 7, 'iterations': 2000},           # 高密度, 可加大容量
+        '电容式电压互感器':  {'depth': 5, 'iterations': 1200, 'l2_leaf_reg': 5},  # 中密度
+        '交流支柱绝缘子':    {'depth': 4, 'iterations': 800, 'l2_leaf_reg': 8},   # 低密度+高CV→浅树+强正则
+        '断路器保护':       {'depth': 4, 'iterations': 800, 'l2_leaf_reg': 8},   # 同上
+        '电抗器保护':       {'depth': 5, 'iterations': 1000, 'l2_leaf_reg': 5},  # 中密度
+    },
+    'cond_catboost': {
+        # CondCatBoost 默认已较强(depth=7, iters=2000), 仅对过拟合高风险物资降级
+        '断路器保护':       {'depth': 4, 'iterations': 1000, 'l2_leaf_reg': 8},
+        '交流支柱绝缘子':    {'depth': 5, 'iterations': 1200, 'l2_leaf_reg': 6},
+    },
+    'twostage_cls': {
+        '断路器保护':       {'depth': 3, 'iterations': 500, 'l2_leaf_reg': 8},
+        '交流支柱绝缘子':    {'depth': 4, 'iterations': 600, 'l2_leaf_reg': 6},
+    },
+    'twostage_reg': {
+        '交流避雷器':      {'depth': 7, 'iterations': 2000},
+        '断路器保护':       {'depth': 4, 'iterations': 800, 'l2_leaf_reg': 8},
+        '电抗器保护':       {'depth': 5, 'iterations': 1000, 'l2_leaf_reg': 5},
+    },
+    'catboost_direct': {
+        # 直接回归在波动数据上(Ridge/CV>1)优于两阶段, 按CV调参防过拟合
+        '断路器保护':       {'depth': 4, 'iterations': 3000, 'l2_leaf_reg': 5},  # CV=1.26→浅树+更多迭代+强正则
+        '交流支柱绝缘子':    {'depth': 4, 'iterations': 2000, 'l2_leaf_reg': 6},  # CV=0.78+极端值→防过拟合
+        '电抗器保护':       {'depth': 5, 'iterations': 2000, 'l2_leaf_reg': 4},  # CV=0.92→中等复杂度
+    },
+    'catboost_tweedie': {
+        # Tweedie单阶段:  复合Poisson-Gamma分布天然处理零膨胀, 波动数据上预期优于RMSE
+        # p值(CatBoost的tweedie_variance_power)默认=1.5, 波动大的物资可加大(方差∝均值^p)
+        '断路器保护':       {'depth': 4, 'iterations': 3000, 'l2_leaf_reg': 5},  # CV=1.26: 同直接回归配置
+        '交流支柱绝缘子':    {'depth': 5, 'iterations': 2000, 'l2_leaf_reg': 4},  # CV=0.78: 中配置
+        '电抗器保护':       {'depth': 5, 'iterations': 2000, 'l2_leaf_reg': 3},  # CV=0.92: 中配置
+    },
+}
+
+
+def _match_hp(material, overrides):
+    """在 overrides 字典中查找匹配 material 的键, 返回合并参数(或空dict)"""
+    for key, params in overrides.items():
+        if key in material:
+            return params
+    return {}
+
+
+def get_hp(model_key, material):
+    """获取指定模型+物资的超参数: HP_DEFAULTS[model_key] + HP_OVERRIDES[model_key][material_match]
+
+    用法: params = get_hp('catboost_2s', material)
+          reg = CatBoostRegressor(**params, loss_function='RMSE', ...)
+    """
+    defaults = HP_DEFAULTS.get(model_key, {})
+    overrides = HP_OVERRIDES.get(model_key, {})
+    material_overrides = _match_hp(material, overrides)
+    return {**defaults, **material_overrides}  # 覆盖合并 (material takes priority)
 N_TEST = 12  # 测试集月数
 OUTPUT_DIR = 'outputs/figures'
 LOG_DIR = 'outputs/logs'
@@ -251,7 +344,7 @@ def preprocess_data(df, material):
         n = len(seq)
         lag1 = np.zeros(n); lag1[1:] = seq[:-1]
         lag12 = np.zeros(n); lag12[12:] = seq[:-12]
-        roll3 = np.array([np.mean(seq[max(0,i-3):i]) for i in range(n)])  # 仅历史值, 无数据泄露
+        roll3 = np.array([np.mean(seq[max(0,i-3):i]) for i in range(n)])
         return lag1, lag12, roll3
 
     lag1_tr, lag12_tr, roll3_tr = make_lag_rolling(demand_train)
@@ -261,14 +354,52 @@ def preprocess_data(df, material):
         is_zero_lag12_tr[i] = (demand_train[i-12] == 0)
     m_train = (np.arange(train_len)+1) % 12; m_train[m_train==0]=12
     q_train = ((np.arange(train_len)+1) // 3) % 4; q_train[q_train==0]=4
+
+    # 实验1: 事件保持特征 (SHOS-based)
+    evt_feats_tr = []
+    if USE_EVENT_FEATURES:
+        d = demand_train
+        n = train_len
+        # Stop类: 距上次事件的间隔
+        gap_since_last = np.zeros(n)
+        last_event = -999
+        for i in range(n):
+            if d[i] > 0: last_event = i
+            gap_since_last[i] = i - last_event if last_event >= 0 else n
+        # Hoover类: 事件密度
+        evt_cnt_6m = np.zeros(n); evt_cnt_12m = np.zeros(n)
+        cumul_12m = np.zeros(n)
+        for i in range(n):
+            evt_cnt_6m[i] = np.sum(d[max(0,i-5):i+1] > 0)
+            evt_cnt_12m[i] = np.sum(d[max(0,i-11):i+1] > 0)
+            cumul_12m[i] = np.sum(d[max(0,i-11):i+1])
+        # Occurrence类: 月份事件频率(平滑)
+        month_freq = np.zeros(n)
+        cal_month = np.array([(4+i)%12+1 for i in range(n)])
+        for i in range(12, n):
+            past_same_month = [j for j in range(i) if cal_month[j]==cal_month[i]]
+            if past_same_month:
+                month_freq[i] = np.mean(d[past_same_month] > 0)
+        # 注: last_evt_mag/evt_trend/evt_cv 在测试集为常数(仅复制训练集最后值), 已移除
+        evt_feats_tr = [gap_since_last, evt_cnt_6m, evt_cnt_12m, cumul_12m, month_freq]
+
+    # 方案A: 季度末哑变量
+    qtr_end_cols = []
+    if USE_QUARTER_DUMMIES:
+        cal_month_tr = np.array([(4 + i) % 12 + 1 for i in range(train_len)])
+        is_q1_end = (cal_month_tr == 3).astype(float)
+        is_q2_end = (cal_month_tr == 6).astype(float)
+        is_q3_q4_end = ((cal_month_tr == 9) | (cal_month_tr == 12)).astype(float)
+        qtr_end_cols = [is_q1_end, is_q2_end, is_q3_q4_end]
+
     X_train_raw = np.column_stack([
         data_train[:,1:], lag1_tr, lag12_tr, roll3_tr,
         is_zero_lag1_tr, is_zero_lag12_tr,
         np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12),
-        np.sin(2*np.pi*q_train/4), np.cos(2*np.pi*q_train/4)
-    ])
+        np.sin(2*np.pi*q_train/4), np.cos(2*np.pi*q_train/4),
+    ] + evt_feats_tr + qtr_end_cols)
 
-    # Step 3: 特征Scaler仅对训练集fit, y不归一化
+    # Step 3: 特征Scaler仅对训练集fit
     feature_scaler = MinMaxScaler()
     X_train = feature_scaler.fit_transform(X_train_raw)
     y_train = demand_train.copy()
@@ -279,449 +410,59 @@ def preprocess_data(df, material):
         idx = train_len + i
         lag1_te[i] = demand_raw[idx-1] if idx>0 else 0
         lag12_te[i] = demand_raw[idx-12] if idx>=12 else 0
-        roll3_te[i] = np.mean(demand_raw[max(0,idx-3):idx])  # 仅历史值, 无未来泄露
-
+        roll3_te[i] = np.mean(demand_raw[max(0,idx-3):idx])
     is_zero_lag1_te = (lag1_te == 0).astype(float)
     is_zero_lag12_te = (lag12_te == 0).astype(float)
     m_test = (np.arange(train_len+1, train_len+N_TEST+1)) % 12; m_test[m_test==0]=12
     q_test = ((np.arange(train_len+1, train_len+N_TEST+1)) // 3) % 4; q_test[q_test==0]=4
+
+    # 实验1: 测试集事件特征
+    evt_feats_te = []
+    if USE_EVENT_FEATURES:
+        d_all = demand_raw; tl = train_len; nt = N_TEST
+        gap_sl_te = np.zeros(nt); last_ev = -999
+        for i in range(tl):
+            if d_all[i] > 0: last_ev = i
+        for i in range(nt):
+            idx = tl + i
+            if d_all[idx] > 0: last_ev = idx
+            gap_sl_te[i] = idx - last_ev if last_ev >= 0 else tl
+        ec6_te = np.zeros(nt); ec12_te = np.zeros(nt); cu12_te = np.zeros(nt)
+        for i in range(nt):
+            seq = d_all[max(0,tl+i-5):tl+i+1]
+            seq12 = d_all[max(0,tl+i-11):tl+i+1]
+            ec6_te[i] = np.sum(np.array(seq) > 0)
+            ec12_te[i] = np.sum(np.array(seq12) > 0)
+            cu12_te[i] = np.sum(seq12)
+        mf_te = np.zeros(nt); cal_m_all = np.array([(4+i)%12+1 for i in range(tl+nt)])
+        for i in range(nt):
+            past_same = [j for j in range(tl+i) if cal_m_all[j]==cal_m_all[tl+i]]
+            if past_same: mf_te[i] = np.mean(d_all[past_same] > 0)
+        # 注: last_evt_mag/evt_trend/evt_cv 在测试集为常数, 已移除
+        evt_feats_te = [gap_sl_te, ec6_te, ec12_te, cu12_te, mf_te]
+
+    qtr_end_cols_te = []
+    if USE_QUARTER_DUMMIES:
+        cal_month_te = np.array([(4 + (train_len + i)) % 12 + 1 for i in range(N_TEST)])
+        is_q1_end_te = (cal_month_te == 3).astype(float)
+        is_q2_end_te = (cal_month_te == 6).astype(float)
+        is_q3_q4_end_te = ((cal_month_te == 9) | (cal_month_te == 12)).astype(float)
+        qtr_end_cols_te = [is_q1_end_te, is_q2_end_te, is_q3_q4_end_te]
+
     X_test_raw = np.column_stack([
         data_test[:,1:], lag1_te, lag12_te, roll3_te,
         is_zero_lag1_te, is_zero_lag12_te,
         np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12),
-        np.sin(2*np.pi*q_test/4), np.cos(2*np.pi*q_test/4)
-    ])
+        np.sin(2*np.pi*q_test/4), np.cos(2*np.pi*q_test/4),
+    ] + evt_feats_te + qtr_end_cols_te)
     X_test = feature_scaler.transform(X_test_raw)
     y_test = demand_test.copy()
 
-    logger.info(f"  [特征工程] top4={top4}, n_feat={X_train.shape[1]}维, 训练={train_len}月")
+    logger.info(f"  [特征工程] top4={top4}, n_feat={X_train.shape[1]}维, 训练={train_len}月"
+                + (" [事件特征ON]" if USE_EVENT_FEATURES else "")
+                + (" [log1p]" if USE_LOG1P_TARGET else ""))
     return X_train, y_train, X_test, y_test, feature_scaler
 
-def vmd_decompose_full(signal, K=VMD_K, alpha=VMD_ALPHA):
-    """对需求量序列进行VMD分解，返回所有IMF和残差/模态索引。
-
-    vmdpy可能截断1个样本，此函数将signal截断到IMF长度以保证一致。
-    """
-    u, u_hat, omega = VMD(signal, alpha, 0, K, 0, 1, 1e-7)
-    residual_idx = int(np.argmin(np.abs(omega[-1])))
-    modal_indices = [i for i in range(K) if i != residual_idx]
-    eff_len = u.shape[1]
-    sig = signal[:eff_len]
-    return u, u_hat, omega, residual_idx, modal_indices, sig
-
-
-def extrapolate_imfs(imfs_train, n_test, residual_idx=None, method='seasonal_linear'):
-    """将训练集IMF外推至测试集长度（避免Look-Ahead Bias）
-
-    - seasonal_linear: 趋势分量线性回归 + 周期分量季节性naive（默认）
-    - seasonal_naive: 季节性naive（复制去年同期值）
-    - persistence: 所有分量重复最后一个值
-    """
-    n_train, K = imfs_train.shape
-    result = np.zeros((n_test, K))
-    for k in range(K):
-        if method in ('seasonal_linear', 'seasonal_naive'):
-            if residual_idx is not None and k == residual_idx:
-                # 趋势分量: 线性外推 y = a*t + b
-                t_train = np.arange(n_train)
-                a, b = np.polyfit(t_train, imfs_train[:, k], 1)
-                t_test = np.arange(n_train, n_train + n_test)
-                result[:, k] = a * t_test + b
-            else:
-                # 模态分量: 季节性naive — 复制去年同期的最后N个周期
-                for i in range(n_test):
-                    src_idx = n_train - 12 + (i % 12)  # 去年同期位置
-                    if src_idx < 0:
-                        src_idx = 0
-                    result[i, k] = imfs_train[src_idx, k]
-        else:
-            # persistence: 所有分量重复最后一个值
-            result[:, k] = imfs_train[-1, k]
-    return result
-
-
-def vmd_optimize_k(signal, k_range=range(2, 8), alpha=VMD_ALPHA, freq_ratio_threshold=1.5):
-    """通过中心频率分离度确定最优K值，避免过分解或欠分解
-
-    对 K=3~7 逐一尝试VMD分解，检查最终中心频率的分离度：
-    - 若相邻中心频率比值均 > freq_ratio_threshold，说明分解充分，尝试更大K
-    - 若出现频率混叠（比值过小），说明过分解，停止并返回上一个有效K
-    """
-    if not VMD_AUTO_K:
-        return 3
-    best_k = 3
-    for k in k_range:
-        try:
-            u, u_hat, omega = VMD(signal, alpha, 0, k, 0, 1, 1e-7)
-            final_freqs = np.sort(omega[-1])
-            if len(final_freqs) >= 2:
-                ratios = final_freqs[1:] / (final_freqs[:-1] + 1e-10)
-                if np.all(ratios > freq_ratio_threshold):
-                    best_k = k
-                else:
-                    break
-            else:
-                best_k = k
-        except Exception:
-            break
-    logger.debug(f"  [VMD优化] 最优K={best_k} (搜索范围{list(k_range)}, 频率分离阈值={freq_ratio_threshold})")
-    return best_k
-
-
-def filter_imfs_by_correlation(imfs, signal, corr_threshold=0.05):
-    """对分解后的IMF做相关性分析，剔除与原序列相关度 < corr_threshold 的噪声分量
-
-    返回应保留的IMF索引列表。若筛选后不足2个，退回保留相关度最高的两个。
-    """
-    n_imfs = imfs.shape[0]
-    min_len = min(imfs.shape[1], len(signal))
-    corrs = [abs(np.corrcoef(imfs[i][:min_len], signal[:min_len])[0, 1]) for i in range(n_imfs)]
-    keep_idx = [i for i, c in enumerate(corrs) if c >= corr_threshold]
-    if len(keep_idx) < 2:
-        keep_idx = np.argsort(corrs)[-2:].tolist()
-    dropped = [i for i in range(n_imfs) if i not in keep_idx]
-    if dropped:
-        logger.debug(f"  [IMF筛选] 剔除IMF{dropped} (相关度<{corr_threshold}), 保留IMF{keep_idx}")
-    return keep_idx
-
-
-# ===================== 5. Transformer 模型定义 =====================
-class PositionalEncoding(nn.Module):
-    """正弦位置编码: 给Transformer注入时间顺序信息"""
-    def __init__(self, d_model, max_len=100):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(np.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe.unsqueeze(0))
-
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1), :]
-
-
-class ProbSparseAttention(nn.Module):
-    """Informer ProbSparse 自注意力 —— O(L log L) 复杂度
-
-    核心思想：只对"活跃"(注意力分布不均匀)的 top-u 个 Query 计算完整注意力，
-    其余 Query 用 V 的均值替代，将复杂度从 O(L²) 降到 O(L log L)。
-
-    Args:
-        d_model: 特征维度
-        nhead: 注意力头数
-        dropout: dropout 比率
-        factor: 采样因子 (c in paper, default=5)
-    """
-    def __init__(self, d_model, nhead, dropout=0.1, factor=5):
-        super().__init__()
-        assert d_model % nhead == 0, f"d_model({d_model}) 必须能被 nhead({nhead}) 整除"
-        self.d_model = d_model
-        self.nhead = nhead
-        self.d_k = d_model // nhead
-        self.factor = factor
-        self.dropout = nn.Dropout(dropout)
-        self.W_q = nn.Linear(d_model, d_model)
-        self.W_k = nn.Linear(d_model, d_model)
-        self.W_v = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
-
-    def _prob_QK(self, Q, K, top_k):
-        """计算查询稀疏性度量 M(q_i, K) 并选取 top-u 个活跃查询"""
-        # Q: (B, L_Q, d_model), K: (B, L_K, d_model)
-        B, L_Q, _ = Q.shape
-        L_K = K.shape[1]
-
-        # 采样: 取 K 的子集用于快速估计稀疏性 (Informer Eq.4)
-        U_part = min(self.factor * int(np.ceil(np.log(L_K))), L_K)
-        if U_part >= L_K:
-            # 序列太短，退化为标准注意力
-            return Q, K, torch.ones(B, L_Q, device=Q.device, dtype=torch.bool)
-
-        # 随机采样 K 的子集
-        idx = torch.randperm(L_K, device=Q.device)[:U_part]
-        K_sample = K[:, idx, :]  # (B, U_part, d_model)
-
-        # 计算稀疏性度量: M(q_i, K) = max(q_i·K^T) - mean(q_i·K^T)
-        Q_heads = self.W_q(Q).view(B, L_Q, self.nhead, self.d_k).transpose(1, 2)  # (B, H, L_Q, D)
-        K_sample_heads = self.W_k(K_sample).view(B, U_part, self.nhead, self.d_k).transpose(1, 2)  # (B, H, U_part, D)
-        scale = self.d_k ** 0.5
-        scores_sample = torch.matmul(Q_heads, K_sample_heads.transpose(-2, -1)) / scale  # (B, H, L_Q, U_part)
-        M = scores_sample.max(dim=-1)[0] - scores_sample.mean(dim=-1)  # (B, H, L_Q)
-        M = M.mean(dim=1)  # 跨头平均 → (B, L_Q)
-
-        # 选取 top-u 个活跃查询 (u = c * log L_Q)
-        u = min(self.factor * int(np.ceil(np.log(L_Q))), L_Q)
-        _, top_idx = torch.topk(M, u, dim=-1)  # (B, u)
-        active_mask = torch.zeros(B, L_Q, device=Q.device, dtype=torch.bool)
-        active_mask.scatter_(1, top_idx, True)
-        return Q, K, active_mask
-
-    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
-        B, L_Q, _ = query.shape
-        L_K = key.shape[1]
-
-        # 获取活跃查询掩码
-        _, _, active_mask = self._prob_QK(query, key, top_k=None)
-
-        # 投影
-        Q = self.W_q(query).view(B, L_Q, self.nhead, self.d_k).transpose(1, 2)  # (B, H, L_Q, D)
-        K = self.W_k(key).view(B, L_K, self.nhead, self.d_k).transpose(1, 2)
-        V = self.W_v(value).view(B, L_K, self.nhead, self.d_k).transpose(1, 2)
-        scale = self.d_k ** 0.5
-
-        # 完整注意力仅对活跃查询计算
-        attn_output = torch.zeros(B, self.nhead, L_Q, self.d_k, device=query.device)
-
-        scores_full = torch.matmul(Q, K.transpose(-2, -1)) / scale  # (B, H, L_Q, L_K)
-        attn_full = torch.softmax(scores_full, dim=-1)
-        attn_full = self.dropout(attn_full)
-
-        # 活跃查询使用完整注意力结果
-        active_h = active_mask.unsqueeze(1).expand(-1, self.nhead, -1)  # (B, H, L_Q)
-        for b in range(B):
-            for h in range(self.nhead):
-                active_q = active_h[b, h]
-                if active_q.any():
-                    attn_output[b, h, active_q] = torch.matmul(
-                        attn_full[b, h, active_q], V[b, h])
-
-        # 非活跃查询用 V 的均值
-        inactive_q = ~active_h
-        if inactive_q.any():
-            V_mean = V.mean(dim=2, keepdim=True).expand(-1, -1, L_Q, -1)  # (B, H, L_Q, D)
-            for b in range(B):
-                for h in range(self.nhead):
-                    if inactive_q[b, h].any():
-                        attn_output[b, h, inactive_q[b, h]] = V_mean[b, h, inactive_q[b, h]]
-
-        # 重组输出
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, L_Q, self.d_model)
-        return self.out_proj(attn_output), None
-
-
-class TransformerEncoderLayer(nn.Module):
-    """Transformer 编码器层 —— 支持标准注意力和 ProbSparse 注意力"""
-    def __init__(self, d_model, nhead, dropout=0.1, use_prob_sparse=False):
-        super().__init__()
-        self.use_prob_sparse = use_prob_sparse
-        if use_prob_sparse:
-            self.self_attn = ProbSparseAttention(d_model, nhead, dropout)
-        else:
-            self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.linear1 = nn.Linear(d_model, d_model * 4)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_model * 4, d_model)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.activation = nn.ReLU()
-
-    def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        # Self-attention
-        attn_out, _ = self.self_attn(src, src, src, attn_mask=src_mask,
-                                      key_padding_mask=src_key_padding_mask)
-        src = self.norm1(src + self.dropout1(attn_out))
-        # FFN
-        ffn_out = self.linear2(self.dropout(self.activation(self.linear1(src))))
-        src = self.norm2(src + self.dropout2(ffn_out))
-        return src
-
-
-class MultiFeatureTransformer(nn.Module):
-    """多特征Transformer: 滑动窗口输入 → 单步预测（全局注意力）
-
-    支持标准 Transformer 和 Informer ProbSparse 注意力切换。
-    """
-    def __init__(self, input_size=5, hidden_size=32, dropout=0.2, nhead=4, num_layers=2,
-                 use_informer=False):
-        super().__init__()
-        d_model = hidden_size
-        self.input_proj = nn.Linear(input_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, max_len=100)
-        self.layers = nn.ModuleList([
-            TransformerEncoderLayer(d_model, nhead, dropout, use_prob_sparse=use_informer)
-            for _ in range(num_layers)
-        ])
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Sequential(nn.Linear(d_model, d_model//2), nn.ReLU(), nn.Linear(d_model//2, 1))
-
-    def forward(self, x):
-        x = self.input_proj(x)
-        x = self.pos_encoder(x)
-        for layer in self.layers:
-            x = layer(x)
-        x = self.dropout(x[:, -1, :])
-        return self.fc(x)
-
-
-class SingleFeatureTransformer(nn.Module):
-    """单特征Transformer: 滑动窗口 → 单步预测"""
-    def __init__(self, hidden_size=16, dropout=0.2, nhead=4, num_layers=2,
-                 use_informer=False):
-        super().__init__()
-        d_model = hidden_size
-        self.input_proj = nn.Linear(1, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, max_len=100)
-        self.layers = nn.ModuleList([
-            TransformerEncoderLayer(d_model, nhead, dropout, use_prob_sparse=use_informer)
-            for _ in range(num_layers)
-        ])
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Sequential(nn.Linear(d_model, max(d_model//2, 4)), nn.ReLU(),
-                                nn.Linear(max(d_model//2, 4), 1))
-
-    def forward(self, x):
-        x = self.input_proj(x)
-        x = self.pos_encoder(x)
-        for layer in self.layers:
-            x = layer(x)
-        x = self.dropout(x[:, -1, :])
-        return self.fc(x)
-
-
-def create_sequences(data, seq_len=SEQ_LEN, stride=1):
-    """构建时间窗口序列 X:(n, seq_len, features), y:(n,)
-
-    stride < seq_len 时创建重叠窗口，扩充Transformer训练样本量。
-    """
-    if data.ndim == 1:
-        data = data.reshape(-1, 1)
-    X, y_list = [], []
-    for i in range(0, len(data) - seq_len, stride):
-        X.append(data[i:i + seq_len])
-        y_list.append(data[i + seq_len, 0])
-    return np.array(X), np.array(y_list)
-
-
-def create_full_sequence(data, train_len=36, pred_len=12):
-    """整序列: 用前train_len步预测后pred_len步 (Transformer专用)"""
-    if data.ndim == 1:
-        data = data.reshape(-1, 1)
-    X = data[:train_len].reshape(1, train_len, -1)  # (1, 36, features)
-    y = data[train_len:train_len+pred_len, 0]        # (12,)
-    return X, y
-
-
-def hybrid_autoregressive_predict(model, initial_window, n_steps, ar_steps=3,
-                                   factor_seq=None, extrapolated_seq=None):
-    """混合预测: 前ar_steps自回归 + 后续用外推IMF避免误差累积
-
-    纯自回归预测在波动性数据（如避雷器）上会指数级放大误差。
-    混合策略: 前 ar_steps 步使用模型自己的预测值（误差可控），
-    后续步骤使用独立的外推 IMF 值作为输入（误差不累积）。
-
-    model: 训练好的 Transformer 模型
-    initial_window: (seq_len, n_features) 初始输入窗口（来自训练集末尾）
-    n_steps: 预测步数
-    ar_steps: 自回归步数（默认3，前3个月误差累积有限）
-    factor_seq: (n_steps, n_factors) 测试期外部因子序列
-    extrapolated_seq: (n_steps,) 测试期外推 IMF 值（用于 ar_steps 之后的步数）
-    Returns: (n_steps,) 预测值数组
-    """
-    model.eval()
-    window = initial_window.copy()
-    predictions = []
-    with torch.no_grad():
-        for i in range(n_steps):
-            X = torch.FloatTensor(window).unsqueeze(0).to(DEVICE)
-            pred = model(X).item()
-            predictions.append(pred)
-            # 决定用自回归预测值还是外推值更新窗口
-            if i < ar_steps or extrapolated_seq is None:
-                # 自回归模式: 用模型预测值
-                fill_val = pred
-            else:
-                # 外推模式: 用独立外推值，误差不累积
-                fill_val = extrapolated_seq[i]
-            new_row = [fill_val]
-            if factor_seq is not None:
-                new_row.extend(factor_seq[i].tolist())
-            window = np.vstack([window[1:], np.array(new_row)])
-    return np.array(predictions)
-
-
-def train_transformer_model(model, X, y, epochs=1000, patience=60, lr=None, weight_decay=1e-4):
-    if lr is None:
-        lr = 0.002
-    """训练Transformer模型（Encoder+Self-Attention+ReduceLROnPlateau），返回训练好的模型"""
-    model = model.to(DEVICE)
-    X_t = torch.FloatTensor(X).to(DEVICE)
-    y_t = torch.FloatTensor(y).to(DEVICE)
-
-    if hasattr(model, 'layers') and len(model.layers) > 0:
-        first_layer = model.layers[0]
-        nlayers = len(model.layers)
-        if hasattr(first_layer, 'use_prob_sparse'):
-            is_informer = first_layer.use_prob_sparse
-            nhead = first_layer.self_attn.nhead if is_informer else first_layer.self_attn.num_heads
-        else:
-            is_informer = False
-            nhead = first_layer.self_attn.num_heads
-    else:
-        nhead, nlayers, is_informer = 4, 2, False
-
-    arch_prefix = "Informer(ProbSparse)" if is_informer else "Transformer(标准注意力)"
-
-    if isinstance(model, MultiFeatureTransformer):
-        arch = (f"MultiFeatureTransformer({arch_prefix}) | d_model={model.input_proj.out_features}, "
-                f"nhead={nhead}, num_layers={nlayers}, dropout={model.dropout.p}, ReduceLROnPlateau")
-        train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
-                     f"loss=MSELoss, device={DEVICE} | "
-                     f"训练样本数={len(X)}, 序列长度(seq_len)={X.shape[1]}")
-        logger.info(f"  [架构] {arch}")
-        logger.info(f"  [训练配置] {train_cfg}")
-    elif isinstance(model, SingleFeatureTransformer):
-        arch = (f"SingleFeatureTransformer({arch_prefix}) | d_model={model.input_proj.out_features}, "
-                f"nhead={nhead}, num_layers={nlayers}, dropout={model.dropout.p}, ReduceLROnPlateau")
-        train_cfg = (f"optimizer=Adam, lr={lr}, weight_decay={weight_decay}, epochs={epochs}, patience={patience}, "
-                     f"loss=MSELoss, device={DEVICE} | "
-                     f"训练样本数={len(X)}, 序列长度(seq_len)={X.shape[1]}")
-        logger.debug(f"  [架构] {arch}")
-        logger.debug(f"  [训练配置] {train_cfg}")
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
-        factor=0.5, patience=15, min_lr=1e-5)
-    criterion = nn.MSELoss()
-
-    best_loss = float('inf')
-    best_state = None
-    counter = 0
-
-    for epoch in range(epochs):
-        model.train()
-        optimizer.zero_grad()
-        pred = model(X_t).squeeze()
-        loss = criterion(pred, y_t)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        scheduler.step(loss.item())
-
-        if loss.item() < best_loss:
-            best_loss = loss.item()
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            counter = 0
-        else:
-            counter += 1
-            if counter >= patience:
-                logger.debug(f"  [Transformer收敛] epoch={epoch+1}, best_loss={best_loss:.6f}")
-                break
-    else:
-        logger.debug(f"  [Transformer收敛] epoch={epochs}(max), best_loss={best_loss:.6f}")
-
-    model.load_state_dict(best_state)
-    model.eval()
-    return model
-
-
-# ===================== 6. 模型一: CatBoost =====================
-
-
-# ===================== Baseline: Simple Statistical Models =====================
 def baseline_naive_seasonal(y_train, y_test, period=12):
     """季节性朴素预测: yhat_t = y_{t-period} (抄去年同期)"""
     preds = np.array([y_train[-period + (i % period)] for i in range(len(y_test))])
@@ -757,391 +498,11 @@ def baseline_naive_mean(y_train, y_test):
     preds = np.full(len(y_test), np.mean(y_train))
     return preds, y_test
 
-def evaluate_model_simple(y_true, y_pred):
-    """计算标准评估指标"""
-    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    # sMAPE: symmetric MAPE, handles zeros
-    smape = np.mean(2 * np.abs(y_pred - y_true) / (np.abs(y_pred) + np.abs(y_true) + 1e-10)) * 100
-    # MASE: scale-free error relative to naive forecast
-    naive_errors = np.abs(y_true[1:] - y_true[:-1])
-    mase_denom = np.mean(naive_errors) if len(naive_errors) > 0 else 1
-    mase = np.mean(np.abs(y_true - y_pred)) / max(mase_denom, 1e-10)
-    return {'MSE': round(mse,4), 'RMSE': round(rmse,4), 'MAE': round(mae,4),
-            'R2': round(r2,4), 'sMAPE': round(smape,2), 'MASE': round(mase,4),
-            'zero_acc': round(np.mean((y_true==0)==(y_pred==0)),4)}
-def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material):
-    """模型一: 仅使用原始4因子(无特征工程)，CatBoost基线回归预测"""
-    # 基线模型只用原始4因子，不用特征工程 → 凸显VMD-Transformer-CatBoost的时序建模优势
-    X_tr_raw = X_train_factors.copy()  # 全8维特征
-    X_te_raw = X_test_factors.copy()
-    iters = 1500
-    depth = 6
-    lr = 0.02
-    l2 = 3
-    logger.info(f"  [CatBoost基线] iterations={iters}, lr={lr}, depth={depth}, l2={l2}, "
-                 f"loss=RMSE")
-    model = CatBoostRegressor(
-        iterations=iters, learning_rate=lr, depth=depth, l2_leaf_reg=l2,
-        loss_function='RMSE', early_stopping_rounds=30,
-        random_seed=RANDOM_SEED, verbose=0
-    )
-    n_val = min(12, len(y_train) // 4)
-    X_tr, X_val = X_tr_raw[:-n_val], X_tr_raw[-n_val:]
-    y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
-    model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
+def evaluate_model(y_true, y_pred, y_train=None):
+    """计算 MSE/RMSE/MAE/R²/sMAPE/MASE/WRMSSE
 
-    y_pred = model.predict(X_te_raw)
-    importance = model.get_feature_importance()
-
-    # 反归一化
-    y_test_orig = y_test
-    y_pred_orig = y_pred
-    y_pred_orig = np.maximum(y_pred_orig, 0)  # 物理约束：需求量非负
-
-    return y_pred_orig, y_test_orig, importance, model
-
-
-# ===================== 7. 模型二: VMD-CatBoost =====================
-def run_vmd_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                     material):
-    """模型二: VMD(仅训练集) → IMF外推 → 全部分量+4因子 → CatBoost"""
-    # VMD K值优化 + 仅对训练集需求量进行分解，避免 Look-Ahead Bias
-    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
-    logger.info(f"  [VMD-CatBoost] VMD最优K={opt_k}")
-    u_full, _, omega, _, _, y_trunc = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
-
-    # IMF 相关性筛选
-    keep_idx = filter_imfs_by_correlation(u_full, y_trunc)
-    u_filtered = u_full[keep_idx]
-    n_imfs_kept = len(keep_idx)
-    logger.info(f"  [VMD-CatBoost] IMF筛选: {opt_k}→{n_imfs_kept}个 (保留{keep_idx})")
-
-    imfs_train = u_filtered.T
-    imfs_test = extrapolate_imfs(imfs_train, len(y_test), residual_idx=None, method='seasonal_naive')
-
-    # 拼接特征: IMFs + 因子(截断对齐)
-    X_train_full = np.column_stack([imfs_train, X_train_factors[:len(y_trunc)]])
-    X_test_full = np.column_stack([imfs_test, X_test_factors])
-
-    model = CatBoostRegressor(
-        iterations=1500, learning_rate=0.02, depth=6, l2_leaf_reg=3,
-        loss_function='RMSE', early_stopping_rounds=50,
-        random_seed=RANDOM_SEED, verbose=0
-    )
-    n_val = min(12, len(y_trunc) // 4)
-    X_tr, X_val = X_train_full[:-n_val], X_train_full[-n_val:]
-    y_tr, y_val = y_trunc[:-n_val], y_trunc[-n_val:]
-    model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
-
-    y_pred = model.predict(X_test_full)
-    importance = model.get_feature_importance()
-
-    y_test_orig = y_test
-    y_pred_orig = y_pred
-    y_pred_orig = np.maximum(y_pred_orig, 0)
-
-    return y_pred_orig, y_test_orig, importance, omega, u_full, model
-
-
-# ===================== 8. 模型三: VMD-Transformer-CatBoost =====================
-def run_vmd_transformer_catboost(X_train_factors, y_train, X_test_factors, y_test,
-                                 material):
-    """模型三: VMD(仅训练集) → 残差Transformer + N模态Transformer → CatBoost融合
-
-    核心策略: seq_len=12(1年全景, 36训练样本) + 季节性外推IMF(无自回归误差累积)。
-    自回归预测在波动性数据上误差爆炸，改为全部使用季节性外推IMF构建测试窗口。
+    WRMSSE (M5竞赛标准): 分母为训练集季节性naive误差，对零值不敏感。
     """
-    np.random.seed(RANDOM_SEED)
-    seq_len = TF_SEQ_LEN.get(material, SEQ_LEN)
-    top4 = get_top_factors(material)
-    n_factors = X_train_factors.shape[1]
-    train_len = len(y_train)
-
-    # 1. VMD K值优化 + 仅对训练集分解
-    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
-    logger.info(f"  [VMD-Transformer-CatBoost] VMD最优K={opt_k}, seq_len={seq_len}, "
-                f"训练样本={train_len - seq_len}, 无自回归(全外推IMF)")
-    u_full, _, omega, residual_idx, all_modal_indices, y_trunc = vmd_decompose_full(
-        y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
-    X_trunc = X_train_factors[:len(y_trunc)]
-
-    # 2. IMF相关性筛选
-    keep_idx = filter_imfs_by_correlation(u_full, y_trunc)
-    if residual_idx not in keep_idx:
-        keep_idx = sorted(set(keep_idx) | {residual_idx})
-    keep_idx = sorted(keep_idx)
-    old_to_new = {old: new for new, old in enumerate(keep_idx)}
-    residual_idx_new = old_to_new[residual_idx]
-    modal_indices = [old_to_new[i] for i in all_modal_indices if i in keep_idx]
-    u = u_full[keep_idx]
-    n_imfs = len(keep_idx)
-    logger.info(f"  [VMD-Transformer-CatBoost] IMF筛选: {opt_k}→{n_imfs}个 | "
-                f"残差=IMF{residual_idx+1}(新idx={residual_idx_new}), "
-                f"模态={[f'IMF{list(keep_idx)[i]+1}' for i in range(n_imfs) if i != residual_idx_new]}")
-
-    u_train = u  # (n_imfs, eff_len)
-
-    # 季节性外推 IMF
-    imfs_test_ext = extrapolate_imfs(u_train.T, len(y_test),
-                                     residual_idx=residual_idx_new,
-                                     method='seasonal_linear')
-    u_test = imfs_test_ext.T
-
-    tf_preds_train = []
-    tf_preds_test = []
-
-    mf_hidden = TF_MULTI_DIM[material]
-    sf_hidden = TF_SINGLE_DIM[material]
-    tf_ep = TF_EPOCHS[material]
-    tf_do = TF_DROPOUT[material]
-    tf_nhead = TF_NHEAD.get(material, 4)
-
-    # 3. 残差分量 → MultiFeatureTransformer (残差 + 全部因子)
-    residual_train = u_train[residual_idx_new]
-    residual_test = u_test[residual_idx_new]
-
-    residual_features_train = np.column_stack(
-        [residual_train] + [X_trunc[:, j] for j in range(n_factors)])
-    input_size_mf = 1 + n_factors
-
-    X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
-
-    # 构建测试序列
-    residual_full_seq = np.concatenate([residual_train[-seq_len:], residual_test])
-    factor_full_seqs = [np.concatenate([X_train_factors[-seq_len:, j], X_test_factors[:, j]])
-                        for j in range(n_factors)]
-    residual_features_full = np.column_stack([residual_full_seq] + factor_full_seqs)
-    X_r_test, _ = create_sequences(residual_features_full, seq_len, stride=1)
-
-    logger.debug(f"  [残差Transformer] 训练样本={len(X_r)}, 测试样本={len(X_r_test)}, "
-                 f"input_size={input_size_mf}, X.shape={X_r.shape}")
-
-    mf_model = MultiFeatureTransformer(
-        input_size=input_size_mf, hidden_size=mf_hidden, dropout=tf_do,
-        nhead=tf_nhead, num_layers=TF_NLAYERS.get(material, 2),
-        use_informer=USE_INFORMER)
-    mf_model = train_transformer_model(mf_model, X_r, y_r, epochs=tf_ep, lr=TF_LR.get(material, 0.001))
-
-    mf_model.eval()
-    with torch.no_grad():
-        pred_r_train = mf_model(torch.FloatTensor(X_r).to(DEVICE)).cpu().numpy().flatten()
-        pred_r_test = mf_model(torch.FloatTensor(X_r_test).to(DEVICE)).cpu().numpy().flatten()
-    tf_preds_train.append(pred_r_train)
-    tf_preds_test.append(pred_r_test)
-
-    # 4. N个模态分量 → SingleFeatureTransformer
-    for idx in modal_indices:
-        modal_train = u_train[idx]
-        modal_test = u_test[idx]
-        modal_full = np.concatenate([modal_train[-seq_len:], modal_test])
-
-        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
-        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
-
-        logger.debug(f"  [模态Transformer{idx}] 训练样本={len(X_m)}, X.shape={X_m.shape}")
-
-        sf_model = SingleFeatureTransformer(
-            hidden_size=sf_hidden, dropout=tf_do,
-            nhead=tf_nhead, num_layers=TF_NLAYERS.get(material, 2),
-            use_informer=USE_INFORMER)
-        sf_model = train_transformer_model(sf_model, X_m, y_m, epochs=tf_ep, lr=TF_LR.get(material, 0.001))
-
-        sf_model.eval()
-        with torch.no_grad():
-            pred_m_train = sf_model(torch.FloatTensor(X_m).to(DEVICE)).cpu().numpy().flatten()
-            pred_m_test = sf_model(torch.FloatTensor(X_m_test).to(DEVICE)).cpu().numpy().flatten()
-        tf_preds_train.append(pred_m_train)
-        tf_preds_test.append(pred_m_test)
-
-    # 5. CatBoost 融合
-    train_target_idx = np.arange(seq_len, len(y_trunc), SLIDING_STRIDE)
-    fusion_train = np.column_stack(tf_preds_train + [X_trunc[train_target_idx]])
-    fusion_test = np.column_stack(tf_preds_test + [X_test_factors])
-
-    cb_params = {
-        'ac_arrester':   {'iterations': 3000, 'lr': 0.005, 'depth': 4, 'l2': 5},
-        'cvt':           {'iterations': 2000, 'lr': 0.01, 'depth': 5, 'l2': 3},
-        'post_insulator': {'iterations': 2000, 'lr': 0.01, 'depth': 5, 'l2': 3},
-    }
-    cb = cb_params.get(material, cb_params['ac_arrester'])
-
-    fusion_model = CatBoostRegressor(
-        iterations=cb['iterations'], learning_rate=cb['lr'],
-        depth=cb['depth'], l2_leaf_reg=cb['l2'],
-        loss_function='RMSE', early_stopping_rounds=80,
-        random_seed=RANDOM_SEED, verbose=0
-    )
-    n_fusion_val = min(12, len(train_target_idx) // 3)
-    fusion_model.fit(fusion_train, y_trunc[train_target_idx],
-                     eval_set=(fusion_train[-n_fusion_val:], y_trunc[train_target_idx][-n_fusion_val:]))
-
-    y_pred_fusion = fusion_model.predict(fusion_test)
-    importance = fusion_model.get_feature_importance()
-
-    effective_test_len = len(y_pred_fusion)
-    y_test_aligned = y_test[-effective_test_len:]
-
-    y_test_orig = y_test_aligned
-    y_pred_orig = y_pred_fusion
-
-    return y_pred_orig, y_test_orig, importance, omega, u_full, fusion_model
-
-
-# ===================== 9. 模型四: VMD-Transformer（直接求和消融实验） =====================
-def run_vmd_transformer_direct_sum(X_train_factors, y_train, X_test_factors, y_test,
-                                   material):
-    """模型四: VMD → Transformer预测各分量 → 直接求和（无CatBoost融合层）
-
-    消融实验: 对比 VMD-Transformer 与 VMD-Transformer-CatBoost。
-    seq_len=12, 全外推IMF(无自回归误差累积)。
-    """
-    seq_len = SEQ_LEN
-    top4 = get_top_factors(material)
-    n_factors = X_train_factors.shape[1]
-    train_len = len(y_train)
-
-    # 1. VMD K值优化
-    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
-    logger.info(f"  [VMD-Transformer直接求和] VMD最优K={opt_k}, seq_len={seq_len}, "
-                f"训练样本={train_len - seq_len}, 全外推IMF")
-    u_full, _, omega, residual_idx, all_modal_indices, y_trunc = vmd_decompose_full(
-        y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
-    X_trunc = X_train_factors[:len(y_trunc)]
-
-    # 2. IMF相关性筛选
-    keep_idx = filter_imfs_by_correlation(u_full, y_trunc)
-    if residual_idx not in keep_idx:
-        keep_idx = sorted(set(keep_idx) | {residual_idx})
-    keep_idx = sorted(keep_idx)
-    old_to_new = {old: new for new, old in enumerate(keep_idx)}
-    residual_idx_new = old_to_new[residual_idx]
-    modal_indices = [old_to_new[i] for i in all_modal_indices if i in keep_idx]
-    u = u_full[keep_idx]
-    n_imfs = len(keep_idx)
-    logger.info(f"  [VMD-Transformer直接求和] IMF筛选: {opt_k}→{n_imfs}个 | "
-                f"残差=IMF{residual_idx+1}(新idx={residual_idx_new}), "
-                f"模态={[f'IMF{list(keep_idx)[i]+1}' for i in range(n_imfs) if i != residual_idx_new]}")
-
-    u_train = u
-    imfs_test_ext = extrapolate_imfs(u_train.T, len(y_test),
-                                     residual_idx=residual_idx_new,
-                                     method='seasonal_linear')
-    u_test = imfs_test_ext.T
-
-    tf_preds_train = []
-    tf_preds_test = []
-
-    mf_hidden = TF_MULTI_DIM[material]
-    sf_hidden = TF_SINGLE_DIM[material]
-    tf_ep = TF_EPOCHS[material]
-    tf_do = TF_DROPOUT[material]
-    tf_nhead = TF_NHEAD.get(material, 4)
-
-    # 3. 残差分量 → MultiFeatureTransformer (残差 + 全部因子)
-    residual_train = u_train[residual_idx_new]
-    residual_test = u_test[residual_idx_new]
-    residual_features_train = np.column_stack(
-        [residual_train] + [X_trunc[:, j] for j in range(n_factors)])
-    input_size_mf = 1 + n_factors
-
-    X_r, y_r = create_sequences(residual_features_train, seq_len, stride=SLIDING_STRIDE)
-    residual_full_seq = np.concatenate([residual_train[-seq_len:], residual_test])
-    factor_seqs = [np.concatenate([X_trunc[-seq_len:, j], X_test_factors[:, j]])
-                   for j in range(n_factors)]
-    X_r_test, _ = create_sequences(np.column_stack([residual_full_seq] + factor_seqs),
-                                   seq_len, stride=1)
-
-    mf_model = MultiFeatureTransformer(
-        input_size=input_size_mf, hidden_size=mf_hidden, dropout=tf_do,
-        nhead=tf_nhead, num_layers=TF_NLAYERS.get(material, 2),
-        use_informer=USE_INFORMER)
-    mf_model = train_transformer_model(mf_model, X_r, y_r, epochs=tf_ep, lr=TF_LR.get(material, 0.001))
-
-    mf_model.eval()
-    with torch.no_grad():
-        pred_r_train = mf_model(torch.FloatTensor(X_r).to(DEVICE)).cpu().numpy().flatten()
-        pred_r_test = mf_model(torch.FloatTensor(X_r_test).to(DEVICE)).cpu().numpy().flatten()
-    tf_preds_train.append(pred_r_train)
-    tf_preds_test.append(pred_r_test)
-
-    # 4. N个模态分量 → SingleFeatureTransformer
-    for idx in modal_indices:
-        modal_train = u_train[idx]
-        modal_test = u_test[idx]
-        modal_full = np.concatenate([modal_train[-seq_len:], modal_test])
-
-        X_m, y_m = create_sequences(modal_train.reshape(-1, 1), seq_len, stride=SLIDING_STRIDE)
-        X_m_test, _ = create_sequences(modal_full.reshape(-1, 1), seq_len, stride=1)
-
-        sf_model = SingleFeatureTransformer(
-            hidden_size=sf_hidden, dropout=tf_do,
-            nhead=tf_nhead, num_layers=TF_NLAYERS.get(material, 2),
-            use_informer=USE_INFORMER)
-        sf_model = train_transformer_model(sf_model, X_m, y_m, epochs=tf_ep, lr=TF_LR.get(material, 0.001))
-
-        sf_model.eval()
-        with torch.no_grad():
-            pred_m_train = sf_model(torch.FloatTensor(X_m).to(DEVICE)).cpu().numpy().flatten()
-            pred_m_test = sf_model(torch.FloatTensor(X_m_test).to(DEVICE)).cpu().numpy().flatten()
-        tf_preds_train.append(pred_m_train)
-        tf_preds_test.append(pred_m_test)
-
-    # 5. 直接求和（VMD 重构特性: ΣIMF = 原始信号）
-    y_pred_sum_test = np.sum(tf_preds_test, axis=0)
-
-    effective_test_len = len(y_pred_sum_test)
-    y_test_aligned = y_test[-effective_test_len:]
-
-    y_test_orig = y_test_aligned
-    y_pred_orig = y_pred_sum_test
-
-    return y_pred_orig, y_test_orig, None, omega, u_full, None
-
-
-# ===================== 10. 模型五: VMD-SVR =====================
-def run_vmd_svr(X_train_factors, y_train, X_test_factors, y_test,
-                material):
-    """模型五: VMD(仅训练集)分解 + SVR核方法端到端预测"""
-    opt_k = vmd_optimize_k(y_train, alpha=VMD_ALPHA_MAP[material])
-    logger.info(f"  [VMD-SVR] VMD最优K={opt_k}")
-    u_full, _, omega, _, _, y_trunc = vmd_decompose_full(y_train, K=opt_k, alpha=VMD_ALPHA_MAP[material])
-    keep_idx = filter_imfs_by_correlation(u_full, y_trunc)
-    u_filtered = u_full[keep_idx]
-    n_imfs_kept = len(keep_idx)
-    logger.info(f"  [VMD-SVR] IMF筛选: {opt_k}→{n_imfs_kept}个 (保留{keep_idx})")
-
-    imfs_train = u_filtered.T
-    imfs_test = extrapolate_imfs(imfs_train, len(y_test), residual_idx=None, method='seasonal_naive')
-    X_train_full = np.column_stack([imfs_train, X_train_factors[:len(y_trunc)]])
-    X_test_full = np.column_stack([imfs_test, X_test_factors])
-
-    param_grid = {'C': [0.1, 1, 10, 100],
-                  'gamma': ['scale', 'auto', 0.01, 0.1],
-                  'epsilon': [0.01, 0.05, 0.1, 0.2]}
-    logger.info(f"  [SVR超参数] kernel=rbf, C={param_grid['C']}, gamma={param_grid['gamma']}, "
-                f"epsilon={param_grid['epsilon']} | GridSearchCV(cv=3, scoring=neg_mse) | "
-                f"输入特征数={X_train_full.shape[1]} ({n_imfs_kept}个IMF+{X_train_factors.shape[1]}因子)")
-    svr = SVR(kernel='rbf')
-    grid = GridSearchCV(svr, param_grid, cv=3, scoring='neg_mean_squared_error',
-                        n_jobs=1, verbose=0)
-    grid.fit(X_train_full, y_trunc)
-    logger.info(f"  [SVR最优参数] C={grid.best_params_['C']}, gamma={grid.best_params_['gamma']}, "
-                 f"epsilon={grid.best_params_['epsilon']}")
-
-    y_pred = grid.predict(X_test_full)
-    y_test_orig = y_test
-    y_pred_orig = y_pred
-    y_pred_orig = np.maximum(y_pred_orig, 0)  # 物理约束：需求量非负
-    return y_pred_orig, y_test_orig, None, omega, u_full, grid
-
-
-# ===================== 11. 模型评估 =====================
-def evaluate_model(y_true, y_pred):
-    """计算 MSE/RMSE/MAE/R²/sMAPE/MASE"""
     mse = mean_squared_error(y_true, y_pred)
     rmse = np.sqrt(mse)
     mae = mean_absolute_error(y_true, y_pred)
@@ -1149,9 +510,45 @@ def evaluate_model(y_true, y_pred):
     smape = np.mean(2*np.abs(y_pred-y_true)/(np.abs(y_pred)+np.abs(y_true)+1e-10))*100
     mase_denom = np.mean(np.abs(y_true[1:]-y_true[:-1])) if len(y_true)>1 else 1
     mase = mae / max(mase_denom, 1e-10) if mase_denom > 0 else 999
+    # WRMSSE: 分母是训练集季节性naive的RMSE (M5标准)
+    wmsse = None
+    if y_train is not None and len(y_train) >= 12:
+        seas_naive_pred = np.array([y_train[-12 + (i % 12)] for i in range(len(y_true))])
+        seas_rmse = np.sqrt(np.mean((seas_naive_pred - y_true)**2))
+        seas_naive_train_err = np.sqrt(np.mean((y_train[12:] - y_train[:-12])**2))
+        wmsse = round(seas_rmse / max(seas_naive_train_err, 1e-10), 4)
     return {'MSE': round(mse,4), 'RMSE': round(rmse,4), 'MAE': round(mae,4),
             'R2': round(r2,4), 'sMAPE': round(smape,2), 'MASE': round(mase,4),
+            'WRMSSE': wmsse,
             'zero_acc': round(np.mean((y_true==0)==(y_pred==0)),4)}
+
+
+def crps_score(y_true, pred_quantiles):
+    """sCRPS: 缩放连续排位概率分数。评估概率预测分布质量。
+
+    Args:
+        y_true: shape (n,) 真实值
+        pred_quantiles: shape (n, n_quantiles) 每个时间步的各分位数预测
+    Returns:
+        sCRPS 值 (数值积分近似)
+    """
+    n = len(y_true)
+    yt = np.array(y_true).reshape(-1)
+    pq = np.array(pred_quantiles)
+    if pq.ndim != 2 or pq.shape[0] != n:
+        return None
+    q_levels = np.linspace(0, 1, pq.shape[1])  # [0, 1/(k-1), 2/(k-1), ..., 1]
+    crps_vals = np.zeros(n)
+    for i in range(n):
+        fi = pq[i]
+        indicator = np.array(fi <= yt[i], dtype=float)
+        integrand = (q_levels - indicator)**2
+        # 梯形积分: np.trapz removed in numpy 2.0
+        crps_vals[i] = np.sum((integrand[:-1] + integrand[1:]) / 2 * np.diff(q_levels))
+    crps = np.mean(crps_vals)
+    # 缩放因子: 真实值绝对均值
+    scale = np.mean(np.abs(yt)) if np.mean(np.abs(yt)) > 0 else 1
+    return round(crps / scale, 4)
 
 
 # ===================== 10. 可视化 =====================
@@ -1203,66 +600,29 @@ def plot_prediction_comparison(all_results, material):
     logger.info(f"  [图表] 预测对比图({material}) → {path}")
 
 
-def plot_vmd_decomposition(demand_full, u, omega, material):
-    """VMD分解可视化：原始信号+IMF分量"""
-    n_imfs = len(u)
-    fig, axes = plt.subplots(n_imfs + 1, 1, figsize=(14, 10))
-    eff_len = min(len(demand_full), u.shape[1])
-    t = np.arange(eff_len)
-
-    # 原始信号 (截断对齐)
-    axes[0].plot(t, demand_full[:eff_len], 'k-', linewidth=1.5)
-    axes[0].set_title(f'{MATERIAL_LABELS[material]} — 原始需求量序列', fontsize=12, fontweight='bold')
-    axes[0].set_ylabel('需求量')
-    axes[0].grid(True, alpha=0.3)
-
-    # 各IMF分量
-    final_freqs = omega[-1]
-    for i in range(n_imfs):
-        axes[i + 1].plot(t, u[i][:eff_len], linewidth=1)
-        axes[i + 1].set_ylabel(f'IMF{i+1}\n(f={final_freqs[i]:.3f})')
-        axes[i + 1].grid(True, alpha=0.3)
-        if i == n_imfs - 1:
-            axes[i + 1].set_xlabel('月份序号')
-
-    plt.tight_layout()
-    path = os.path.join(OUTPUT_DIR, f'VMD分解_{material}.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close()
-    logger.info(f"  [图表] VMD分解图({material}) → {path}")
-
-
 def plot_feature_importance(importance_dict, material):
-    """特征重要性条形图（每种物资的CatBoost / VMD-CatBoost / VMD-Transformer-CatBoost）"""
+    """特征重要性条形图（CatBoost 特征重要性）"""
     top4 = get_top_factors(material)
-    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+    imp = importance_dict.get('catboost_imp')
+    if imp is None or len(imp) == 0:
+        return
 
-    for ax_idx, (model_name, imp, feat_name_builder) in enumerate([
-        ('CatBoost', importance_dict.get('catboost_imp'), lambda n: top4),
-        ('VMD-CatBoost', importance_dict.get('vmd_catboost_imp'),
-         lambda n: [f'IMF{i+1}' for i in range(n - len(top4))] + top4),
-        ('VMD-Transformer-CatBoost', importance_dict.get('vmd_transformer_catboost_imp'),
-         lambda n: ['Transformer残差'] + [f'Transformer模态{i+1}' for i in range(n - len(top4) - 1)] + top4),
-    ]):
-        ax = axes[ax_idx]
-        if imp is not None and len(imp) > 0:
-            n_features = len(imp)
-            feat_names = feat_name_builder(n_features)
-            # 截断/补齐标签以匹配实际特征数
-            if len(feat_names) > n_features:
-                feat_names = feat_names[:n_features]
-            elif len(feat_names) < n_features:
-                feat_names = [f'F{i+1}' for i in range(n_features)]
-            colors = plt.cm.Blues(np.linspace(0.4, 0.9, n_features))
-            ax.barh(range(n_features), imp, color=colors, edgecolor='navy', alpha=0.85)
-            ax.set_yticks(range(n_features))
-            ax.set_yticklabels(feat_names)
-            ax.set_xlabel('Importance')
-            ax.set_title(f'{model_name} — {MATERIAL_LABELS[material]}', fontweight='bold')
-            ax.invert_yaxis()
-            ax.grid(True, alpha=0.3, axis='x')
-        else:
-            ax.text(0.5, 0.5, '无特征重要性数据', ha='center', va='center', transform=ax.transAxes)
+    n_features = len(imp)
+    feat_names = list(top4)
+    if len(feat_names) > n_features:
+        feat_names = feat_names[:n_features]
+    elif len(feat_names) < n_features:
+        feat_names = feat_names + [f'F{i+1}' for i in range(len(feat_names), n_features)]
+
+    fig, ax = plt.subplots(figsize=(10, max(5, n_features * 0.4)))
+    colors = plt.cm.Blues(np.linspace(0.4, 0.9, n_features))
+    ax.barh(range(n_features), imp, color=colors, edgecolor='navy', alpha=0.85)
+    ax.set_yticks(range(n_features))
+    ax.set_yticklabels(feat_names)
+    ax.set_xlabel('Importance')
+    ax.set_title(f'CatBoost 特征重要性 — {MATERIAL_LABELS[material]}', fontweight='bold')
+    ax.invert_yaxis()
+    ax.grid(True, alpha=0.3, axis='x')
 
     plt.tight_layout()
     path = os.path.join(OUTPUT_DIR, f'特征重要性_{material}.png')
@@ -1275,13 +635,18 @@ def plot_metrics_comparison(all_metrics):
     """模型指标对比：分组柱状图（各物资各模型的四项指标）"""
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     metric_names = ['MSE', 'RMSE', 'MAE', 'R2']
-    model_names = ['CatBoost', 'NaiveSeasonal', 'Persistence', 'SARIMA', 'CondCatBoost', 'NHiTS', 'TwoStage']
-    colors = ['#2196F3', '#4CAF50', '#FF5722', '#795548', '#9C27B0', '#E91E63', '#00BCD4']
+    # Dynamically collect all model names from results
+    model_names = []
+    for material in MATERIALS:
+        for m in all_metrics[material]:
+            if m not in model_names:
+                model_names.append(m)
+    colors = plt.cm.tab20(np.linspace(0, 1, max(len(model_names), 1)))
 
     for ax_idx, metric in enumerate(metric_names):
         ax = axes[ax_idx // 2, ax_idx % 2]
         x = np.arange(len(MATERIALS))
-        width = 0.16
+        width = 0.8 / max(len(model_names), 1)
 
         for i, model_name in enumerate(model_names):
             values = []
@@ -1297,7 +662,7 @@ def plot_metrics_comparison(all_metrics):
                         f'{val:.4f}', ha='center', va='bottom', fontsize=7, rotation=90)
 
         ax.set_title(metric, fontsize=14, fontweight='bold')
-        ax.set_xticks(x + width * 2)
+        ax.set_xticks(x + width * (len(model_names) - 1) / 2)
         ax.set_xticklabels([MATERIAL_LABELS[m] for m in MATERIALS])
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3, axis='y')
@@ -1339,153 +704,22 @@ def plot_demand_curves(data_dict):
     logger.info(f"  [图表] 需求量曲线 → {path}")
 
 
-# ===================== DLinear (AAAI 2023) — 极简时序预测 =====================
-class DLinearModel(nn.Module):
-    """DLinear: 趋势+季节分解 → 各自一个线性层 → 相加。30行PyTorch."""
-    def __init__(self, lookback, horizon, kernel_size=7):
-        super().__init__()
-        self.kernel_size = kernel_size
-        self.linear_trend = nn.Linear(lookback, horizon)
-        self.linear_seasonal = nn.Linear(lookback, horizon)
-    def forward(self, x):
-        # Moving avg for trend
-        avg = nn.functional.avg_pool1d(x.unsqueeze(1), self.kernel_size, 1,
-            padding=self.kernel_size//2).squeeze(1)
-        trend = self.linear_trend(avg)
-        seasonal = self.linear_seasonal(x - avg)
-        return trend + seasonal
-
-def run_dlinear(y_train, y_test, lookback=24):
-    """DLinear: 极简线性模型(论文中击败复杂Transformer的基线)"""
-    import torch.optim as optim
-    horizon = len(y_test)
-    X_tr, Y_tr = [], []
-    for i in range(len(y_train) - lookback - horizon):
-        X_tr.append(y_train[i:i+lookback]); Y_tr.append(y_train[i+lookback:i+lookback+horizon])
-    if len(X_tr) < 10:
-        return np.full(horizon, np.mean(y_train)), y_test
-    X_tr=np.array(X_tr); Y_tr=np.array(Y_tr)
-    model = DLinearModel(lookback, horizon).to(DEVICE)
-    X_t=torch.FloatTensor(X_tr).to(DEVICE); Y_t=torch.FloatTensor(Y_tr).to(DEVICE)
-    opt=optim.Adam(model.parameters(),lr=0.001,weight_decay=1e-4)
-    best_loss=float('inf'); best_state=None; patience=50
-    for _ in range(300):
-        model.train(); opt.zero_grad()
-        loss=nn.MSELoss()(model(X_t),Y_t); loss.backward(); opt.step()
-        if loss.item()<best_loss:
-            best_loss=loss.item(); patience=50
-            best_state={k:v.clone().cpu() for k,v in model.state_dict().items()}
-        else:
-            patience-=1
-            if patience<=0: break
-    model.load_state_dict(best_state); model.eval()
-    with torch.no_grad():
-        p=model(torch.FloatTensor(y_train[-lookback:]).unsqueeze(0).to(DEVICE)).cpu().numpy().flatten()
-    return np.maximum(p,0), y_test
-
-def run_dlinear_2s(y_train, y_test, lookback=24):
-    """DLinear-2S: 两阶段=DLinear(非零数据)+分类器"""
-    nz=y_train>0
-    if nz.sum()<10: return np.full(len(y_test),np.mean(y_train)),y_test
-    qty,_=run_dlinear(y_train[nz], y_test, min(lookback, nz.sum()-len(y_test)-2))
-    y_bin=(y_train>0).astype(int)
-    cls=CatBoostClassifier(iterations=400,learning_rate=0.05,depth=4,l2_leaf_reg=10,
-        loss_function='Logloss',early_stopping_rounds=20,random_state=RANDOM_SEED,verbose=0)
-    # Use simple features for classifier
-    X_cls=np.column_stack([np.arange(len(y_train)),y_train])
-    X_cls_te=np.column_stack([np.arange(len(y_test))+len(y_train),np.full(len(y_test),0)])
-    nv=max(4,len(y_train)//4)
-    cls.fit(X_cls[:-nv],y_bin[:-nv],eval_set=(X_cls[-nv:],y_bin[-nv:]))
-    prob=np.clip(cls.predict_proba(X_cls_te)[:,1],0,1)
-    return prob*np.maximum(qty,0), y_test
+# ===================== log1p逆变换辅助 =====================
+def _inverse_log1p(y_pred):
+    """如果USE_LOG1P_TARGET启用, 将预测值从log空间逆变换回原始空间"""
+    return np.expm1(y_pred) if USE_LOG1P_TARGET else y_pred
 
 
-# ===================== ModernTCN (ICLR 2024) — 现代时序卷积 =====================
-class ModernTCNBlock(nn.Module):
-    def __init__(self, ch, dilation, dropout=0.1):
-        super().__init__()
-        self.conv=nn.Conv1d(ch,ch,3,padding=dilation,dilation=dilation)
-        self.norm=nn.BatchNorm1d(ch); self.dropout=nn.Dropout(dropout); self.act=nn.ReLU()
-    def forward(self,x):
-        return x+self.dropout(self.act(self.norm(self.conv(x))))  # residual
-
-class ModernTCN(nn.Module):
-    def __init__(self, lookback, horizon, channels=16, layers=4):
-        super().__init__()
-        self.proj=nn.Linear(1,channels)
-        dilations=[1,2,4,8][:layers]
-        self.blocks=nn.ModuleList([ModernTCNBlock(channels,d) for d in dilations])
-        self.head=nn.Linear(channels*lookback, horizon)
-    def forward(self,x):
-        h=self.proj(x.unsqueeze(-1)).transpose(1,2)  # (B,lookback,ch)->(B,ch,lookback)
-        for b in self.blocks: h=b(h)
-        return self.head(h.reshape(h.shape[0],-1))
-
-def run_moderntcn(y_train, y_test, lookback=24):
-    import torch.optim as optim
-    horizon=len(y_test)
-    X_tr,Y_tr=[],[]
-    for i in range(len(y_train)-lookback-horizon):
-        X_tr.append(y_train[i:i+lookback]); Y_tr.append(y_train[i+lookback:i+lookback+horizon])
-    if len(X_tr)<10: return np.full(horizon,np.mean(y_train)),y_test
-    X_tr=np.array(X_tr);Y_tr=np.array(Y_tr)
-    model=ModernTCN(lookback,horizon,channels=8,layers=3).to(DEVICE)
-    X_t=torch.FloatTensor(X_tr).to(DEVICE);Y_t=torch.FloatTensor(Y_tr).to(DEVICE)
-    opt=optim.Adam(model.parameters(),lr=0.001,weight_decay=1e-4)
-    best_loss=float('inf');best_state=None;patience=50
-    for _ in range(300):
-        model.train();opt.zero_grad()
-        loss=nn.MSELoss()(model(X_t),Y_t);loss.backward();opt.step()
-        if loss.item()<best_loss:
-            best_loss=loss.item();patience=50
-            best_state={k:v.clone().cpu() for k,v in model.state_dict().items()}
-        else:
-            patience-=1
-            if patience<=0: break
-    model.load_state_dict(best_state);model.eval()
-    with torch.no_grad():
-        p=model(torch.FloatTensor(y_train[-lookback:]).unsqueeze(0).to(DEVICE)).cpu().numpy().flatten()
-    return np.maximum(p,0),y_test
-
-def run_moderntcn_2s(y_train, y_test, lookback=24):
-    """ModernTCN-2S: 两阶段=ModernTCN(非零)+分类器"""
-    nz=y_train>0
-    if nz.sum()<10: return np.full(len(y_test),np.mean(y_train)),y_test
-    qty,_=run_moderntcn(y_train[nz],y_test,min(lookback,nz.sum()-len(y_test)-2))
-    y_bin=(y_train>0).astype(int)
-    cls=CatBoostClassifier(iterations=400,learning_rate=0.05,depth=4,l2_leaf_reg=10,
-        loss_function='Logloss',early_stopping_rounds=20,random_state=RANDOM_SEED,verbose=0)
-    X_cls=np.column_stack([np.arange(len(y_train)),y_train])
-    X_cls_te=np.column_stack([np.arange(len(y_test))+len(y_train),np.full(len(y_test),0)])
-    nv=max(4,len(y_train)//4)
-    cls.fit(X_cls[:-nv],y_bin[:-nv],eval_set=(X_cls[-nv:],y_bin[-nv:]))
-    prob=np.clip(cls.predict_proba(X_cls_te)[:,1],0,1)
-    return prob*np.maximum(qty,0),y_test
-
-
-# ===================== LightGBM(朴素) — 消融基线 =====================
-def run_lightgbm_pure(X_train_factors, y_train, X_test_factors, y_test):
-    """LightGBM(朴素): 直接回归, 无两阶段"""
-    try:
-        import lightgbm as lgb
-    except ImportError:
-        return None,y_test
-    reg=lgb.LGBMRegressor(n_estimators=500,learning_rate=0.03,max_depth=5,
-        num_leaves=31,reg_alpha=1,reg_lambda=3,random_state=RANDOM_SEED,verbose=-1)
-    nv=min(12,len(y_train)//4)
-    reg.fit(X_train_factors[:-nv],y_train[:-nv],eval_set=[(X_train_factors[-nv:],y_train[-nv:])])
-    return np.maximum(reg.predict(X_test_factors),0),y_test
-
-
-# ===================== 统一两阶段预测框架 =====================
-def _two_stage_fit_predict(X_tr, y_tr, X_te, stage2_regressor):
+# ===================== 4. 两阶段预测框架 =====================
+def _two_stage_fit_predict(X_tr, y_tr, X_te, stage2_regressor, material):
     """所有模型共享的两阶段预测: Stage1分类×Stage2回归 = P×Q"""
     y_bin = (y_tr > 0).astype(int)
     n_pos, n_neg = y_bin.sum(), len(y_bin) - y_bin.sum()
     if n_pos < 5 or n_neg < 5 or (y_tr > 0).sum() < 10:
         return None, None  # 回退信号
 
-    cls = CatBoostClassifier(iterations=600, learning_rate=0.03, depth=5, l2_leaf_reg=5,
+    hp = get_hp('stage1_cls', material)
+    cls = CatBoostClassifier(**hp,
         loss_function='Logloss', early_stopping_rounds=30, random_seed=RANDOM_SEED, verbose=0)
     nv = max(6, len(y_tr)//4)
     cls.fit(X_tr[:-nv], y_bin[:-nv], eval_set=(X_tr[-nv:], y_bin[-nv:]))
@@ -1504,36 +738,91 @@ def _two_stage_fit_predict(X_tr, y_tr, X_te, stage2_regressor):
 
 def run_catboost(X_train_factors, y_train, X_test_factors, y_test, material):
     """CatBoost(朴素): 直接回归, 不使用两阶段框架(消融基线)"""
-    reg = CatBoostRegressor(iterations=1500, learning_rate=0.02, depth=6, l2_leaf_reg=3,
+    y_tr_log = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
+    hp = get_hp('catboost_direct', material)
+    reg = CatBoostRegressor(**hp,
         loss_function='RMSE', early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
-    nv = min(12, len(y_train)//4)
-    reg.fit(X_train_factors[:-nv], y_train[:-nv], eval_set=(X_train_factors[-nv:], y_train[-nv:]))
+    nv = min(12, len(y_tr_log)//4)
+    reg.fit(X_train_factors[:-nv], y_tr_log[:-nv], eval_set=(X_train_factors[-nv:], y_tr_log[-nv:]))
     yp = np.maximum(reg.predict(X_test_factors), 0)
+    if USE_LOG1P_TARGET: yp = np.expm1(yp)
     return yp, y_test, reg.get_feature_importance(), reg
+
+def run_catboost_tweedie(X_train_factors, y_train, X_test_factors, y_test, material):
+    """CatBoost-Tweedie(单阶段):  复合Poisson-Gamma损失函数直接回归。
+
+    关键差异: 不同于两阶段Tweedie(Stage1分类+Stage2的Tweedie loss), 这是单阶段——
+    用全部69个月(含零值)训练, Tweedie损失天然建模"零=未发标+正=采购量"的生成机制。
+    与RMSE直接回归的对比: Tweedie在零点有离散概率质量, 不会强迫模型预测非零。
+
+    预期: 波动数据(CV>1)上 Tweedie > RMSE(直接) >> 两阶段
+    """
+    y_tr_log = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
+    hp = get_hp('catboost_tweedie', material)
+    reg = CatBoostRegressor(**hp,
+        loss_function='Tweedie:variance_power=1.5',
+        early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
+    nv = min(12, len(y_tr_log)//4)
+    reg.fit(X_train_factors[:-nv], y_tr_log[:-nv], eval_set=(X_train_factors[-nv:], y_tr_log[-nv:]))
+    yp = np.maximum(reg.predict(X_test_factors), 0)
+    if USE_LOG1P_TARGET: yp = np.expm1(yp)
+    return yp, y_test, reg.get_feature_importance(), reg
+
+
+# ===================== 实验4: 分位数回归 (可取消) =====================
+def run_catboost_quantile(X_train_factors, y_train, X_test_factors, y_test, material):
+    """分位数回归: 训练 alpha=0.1/0.5/0.9 三个分位数模型。
+
+    中位数(0.5)作为点预测, (0.1, 0.9)作为80%预测区间。
+    优势: 不做硬判决"有/无需求", 而是输出"不确定区间"。
+    当下限>0 → 高置信度有需求; 上限≈0 → 高置信度没有。
+    """
+    y_tr_log = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
+    hp = get_hp('quantile', material)
+    preds = {}
+    for alpha in [0.1, 0.5, 0.9]:
+        reg = CatBoostRegressor(**hp,
+            loss_function=f'Quantile:alpha={alpha}',
+            early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
+        nv = min(12, len(y_tr_log)//4)
+        reg.fit(X_train_factors[:-nv], y_tr_log[:-nv], eval_set=(X_train_factors[-nv:], y_tr_log[-nv:]))
+        p = np.maximum(reg.predict(X_test_factors), 0)
+        if USE_LOG1P_TARGET: p = np.expm1(p)
+        preds[alpha] = p
+    yp = preds[0.5]  # 中位数点预测
+    logger.info(f'  [分位数] 80%区间宽度均值={np.mean(preds[0.9]-preds[0.1]):.2f}')
+    return yp, y_test, None, (preds[0.1], preds[0.9])
+
 
 def run_catboost_2s(X_train_factors, y_train, X_test_factors, y_test, material):
     """TwoStage-CatBoost: 两阶段=分类×CatBoost回归"""
-    reg = CatBoostRegressor(iterations=1500, learning_rate=0.02, depth=6, l2_leaf_reg=3,
+    y_tr_log = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
+    hp = get_hp('catboost_2s', material)
+    reg = CatBoostRegressor(**hp,
         loss_function='RMSE', early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
-    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_tr_log, X_test_factors, reg, material)
     if yp is None:
         logger.warning(f'  [CatBoost-2S] 回退到直接回归')
-        nv = min(12, len(y_train)//4)
-        reg.fit(X_train_factors[:-nv], y_train[:-nv], eval_set=(X_train_factors[-nv:], y_train[-nv:]))
+        nv = min(12, len(y_tr_log)//4)
+        reg.fit(X_train_factors[:-nv], y_tr_log[:-nv], eval_set=(X_train_factors[-nv:], y_tr_log[-nv:]))
         yp = np.maximum(reg.predict(X_test_factors), 0)
+    if USE_LOG1P_TARGET and yp is not None: yp = np.expm1(yp)
     return yp, y_test, reg.get_feature_importance(), reg
 
 
 def run_conditional_catboost(X_train_factors, y_train, X_test_factors, y_test, material):
     """TwoStage-CondCatBoost: 两阶段=分类×更深CatBoost回归"""
-    reg = CatBoostRegressor(iterations=2000, learning_rate=0.015, depth=7, l2_leaf_reg=4,
+    y_tr_log = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
+    hp = get_hp('cond_catboost', material)
+    reg = CatBoostRegressor(**hp,
         loss_function='RMSE', early_stopping_rounds=50, random_seed=RANDOM_SEED, verbose=0)
-    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_tr_log, X_test_factors, reg, material)
     if yp is None:
         logger.warning(f'  [CondCatBoost-2S] 回退到直接回归')
-        nv = min(12, len(y_train)//4)
-        reg.fit(X_train_factors[:-nv], y_train[:-nv], eval_set=(X_train_factors[-nv:], y_train[-nv:]))
+        nv = min(12, len(y_tr_log)//4)
+        reg.fit(X_train_factors[:-nv], y_tr_log[:-nv], eval_set=(X_train_factors[-nv:], y_tr_log[-nv:]))
         yp = np.maximum(reg.predict(X_test_factors), 0)
+    if USE_LOG1P_TARGET and yp is not None: yp = np.expm1(yp)
     return yp, y_test, reg.get_feature_importance(), reg
 
 # 原 TwoStage 保留不变
@@ -1547,7 +836,7 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
     Stage 2: CatBoost 回归 — 对有需求的月份预测需求量
     最终 = P(有需求) × 预测量
     """
-    demand_raw = y_train
+    demand_raw = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
     y_train_binary = (demand_raw > 0).astype(int)
     n_pos = y_train_binary.sum(); n_neg = len(y_train_binary) - n_pos
     if n_pos < 5 or n_neg < 5:
@@ -1555,8 +844,8 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
         return run_catboost(X_train_factors, y_train, X_test_factors, y_test, material)
 
     # Stage 1: 分类器
-    cls = CatBoostClassifier(
-        iterations=800, learning_rate=0.03, depth=5, l2_leaf_reg=5,
+    hp_cls = get_hp('twostage_cls', material)
+    cls = CatBoostClassifier(**hp_cls,
         loss_function='Logloss', early_stopping_rounds=30,
         random_seed=RANDOM_SEED, verbose=0
     )
@@ -1574,10 +863,9 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
         return run_catboost(X_train_factors, y_train, X_test_factors, y_test, material)
 
     X_nz = X_train_factors[nonzero_mask]
-    y_nz = y_train[nonzero_mask]
+    y_nz = demand_raw[nonzero_mask]  # demand_raw已log1p, y_train未变换
 
-    reg = CatBoostRegressor(
-        iterations=1500, learning_rate=0.02, depth=6, l2_leaf_reg=3,
+    reg = CatBoostRegressor(**get_hp('twostage_reg', material),
         loss_function='RMSE', early_stopping_rounds=50,
         random_seed=RANDOM_SEED, verbose=0
     )
@@ -1591,79 +879,42 @@ def run_two_stage(df_all, X_train_factors, y_train, X_test_factors, y_test,
     qty_pred_orig = qty_test
     # 最终 = 概率 × 预测量
     y_pred_orig = prob_test * np.maximum(qty_pred_orig, 0)
-
+    if USE_LOG1P_TARGET: y_pred_orig = np.expm1(np.maximum(y_pred_orig, 0))
     cls_acc = np.mean((prob_test > 0.5).astype(int) == (y_test_orig > 0).astype(int))
     logger.info(f"  [两阶段] Stage1分类准确率={cls_acc:.2%}, 非零训练样本={nonzero_mask.sum()}")
     return y_pred_orig, y_test_orig, None, (cls, reg)
 
 
-# ===================== 批次事件驱动 Conditional CatBoost =====================
-# ===================== Croston-SBA 间歇性需求基线 =====================
-
+# ===================== 线性两阶段模型 =====================
 def run_ridge_2s(X_train_factors, y_train, X_test_factors, y_test, material):
     """TwoStage-Ridge: 两阶段=分类×Ridge回归 (小样本更稳定)"""
     from sklearn.linear_model import RidgeCV
-    reg = RidgeCV(alphas=[0.01,0.1,1.0,10.0,100.0])
-    nz = y_train > 0
-    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    y_tr_log = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
+    hp = get_hp('ridge_2s', material)
+    reg = RidgeCV(**hp)
+    nz = y_tr_log > 0
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_tr_log, X_test_factors, reg, material)
     if yp is None:
-        reg.fit(X_train_factors, y_train)
+        reg.fit(X_train_factors, y_tr_log)
         yp = np.maximum(reg.predict(X_test_factors), 0)
+    if USE_LOG1P_TARGET and yp is not None: yp = np.expm1(yp)
     return yp, y_test, None, reg
 
 
 def run_elasticnet_2s(X_train_factors, y_train, X_test_factors, y_test, material):
     """TwoStage-ElasticNet: 两阶段=分类×ElasticNet(L1+L2, 小样本强正则)"""
     from sklearn.linear_model import ElasticNetCV
-    reg = ElasticNetCV(l1_ratio=[0.1,0.5,0.7,0.9,0.95,1.0], cv=min(5, (y_train>0).sum()),
-                       max_iter=5000, random_state=42)
-    nz = y_train > 0
-    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
+    y_tr_log = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
+    hp = get_hp('elasticnet_2s', material)
+    nz = y_tr_log > 0
+    reg = ElasticNetCV(**hp, cv=min(5, nz.sum()), max_iter=5000, random_state=42)
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_tr_log, X_test_factors, reg, material)
     if yp is None:
-        reg.fit(X_train_factors, y_train)
+        reg.fit(X_train_factors, y_tr_log)
         yp = np.maximum(reg.predict(X_test_factors), 0)
+    if USE_LOG1P_TARGET and yp is not None: yp = np.expm1(yp)
     return yp, y_test, None, reg
 
-
-def run_gp_2s(X_train_factors, y_train, X_test_factors, y_test, material):
-    """TwoStage-GP: 两阶段=分类×GaussianProcess(小样本贝叶斯, 带不确定性)"""
-    from sklearn.gaussian_process import GaussianProcessRegressor
-    from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
-    nz = y_train > 0
-    if nz.sum() < 15:
-        # GP needs more samples; fallback to Ridge
-        return run_ridge_2s(X_train_factors, y_train, X_test_factors, y_test, material)
-    kernel = ConstantKernel(1.0) * RBF(length_scale=1.0) + WhiteKernel(noise_level=1.0)
-    reg = GaussianProcessRegressor(kernel=kernel, alpha=1e-2, normalize_y=True,
-                                    n_restarts_optimizer=3, random_state=42)
-    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors, reg)
-    if yp is None:
-        reg.fit(X_train_factors, y_train)
-        yp = np.maximum(reg.predict(X_test_factors), 0)
-    return yp, y_test, None, reg
-
-
-def run_theta(y_train, y_test):
-    """Theta模型: 分解为趋势(SES) + 季节(乘法/加法), 适合间歇性序列"""
-    from statsmodels.tsa.forecasting.theta import ThetaModel
-    try:
-        m = ThetaModel(y_train, period=12)
-        fit = m.fit()
-        yp = fit.forecast(len(y_test))
-        return np.maximum(yp, 0), y_test
-    except Exception:
-        return np.full(len(y_test), np.mean(y_train)), y_test
-
-
-def run_ses(y_train, y_test):
-    """简单指数平滑: Holt-Winters的退化版, 无趋势无季节"""
-    from statsmodels.tsa.holtwinters import SimpleExpSmoothing
-    try:
-        m = SimpleExpSmoothing(y_train).fit(optimized=True)
-        yp = m.forecast(len(y_test))
-        return np.maximum(yp, 0), y_test
-    except Exception:
-        return np.full(len(y_test), np.mean(y_train)), y_test
 
 def run_croston_sba(y_train, y_test):
     """Croston-SBA: 间歇性需求专用预测。Decompose into demand interval + size.
@@ -1693,44 +944,110 @@ def run_croston_sba(y_train, y_test):
     return np.maximum(preds, 0), y_test
 
 
-# ===================== LightGBM 对比模型 =====================
+# ===================== Chronos 零样本基线 (Phase 1: TSFM通用性边界) =====================
+# chronos-t5-tiny (8M参数, ~50MB): 最小TSFM基线, 内存友好。
+# 首次运行需联网下载。国内网络需代理 (设置HTTPS_PROXY=http://127.0.0.1:7890)
+# 如需更强基线，安装 chronos-2 (pip install "chronos-forecasting>=2.0" + 120M模型)
+CHRONOS_MODEL = os.environ.get('CHRONOS_MODEL', 'amazon/chronos-t5-tiny')
+CHRONOS_LOCAL_PATH = os.environ.get('CHRONOS_LOCAL_PATH', '')
 
-def run_tsb(y_train, y_test):
-    """TSB (Teunter-Syntetos-Babai 2011): 间歇性需求预测.
-    比Croston-SBA增加概率更新: P(t+1) = (1-beta)*P(t) + beta*O(t)"""
-    d_raw = y_train
-    alpha, beta = 0.1, 0.1
-    nonzero_idx = np.where(d_raw > 0)[0]
-    if len(nonzero_idx) < 2:
-        return np.full(len(y_test), np.mean(d_raw)), y_test
-    size_ema = d_raw[nonzero_idx[0]]
-    prob_ema = 1.0 / (nonzero_idx[0] + 1) if nonzero_idx[0] > 0 else 1.0
-    last_nz = nonzero_idx[0]
-    for i in range(1, len(nonzero_idx)):
-        interval = nonzero_idx[i] - last_nz
-        demand = d_raw[nonzero_idx[i]]
-        O = 1.0 / interval if interval > 0 else 1.0
-        prob_ema = (1 - beta) * prob_ema + beta * O
-        size_ema = (1 - alpha) * size_ema + alpha * demand
-        last_nz = nonzero_idx[i]
-    yhat = prob_ema * size_ema
-    return np.full(len(y_test), max(yhat, 0)), y_test
+def baseline_chronos(y_train, y_test, material):
+    """Chronos 零样本预测基线。
 
-def run_lightgbm(X_train_factors, y_train, X_test_factors, y_test):
+    Amazon预训练时序基础模型，在ECP数据上做零样本推断。默认为 chronos-t5-tiny (8M)。
+    定位: 量化"通用预训练模型 vs 领域专项模型"的泛化差距。
+    """
+    try:
+        from chronos import BaseChronosPipeline
+    except ImportError:
+        logger.warning("  [Chronos] chronos-forecasting 未安装, 跳过基线")
+        return None, y_test, None, None
+
+    import torch as _torch
+
+    def _load(pretrained_path, **kw):
+        logger.info(f"  [Chronos] 加载: {pretrained_path}")
+        return BaseChronosPipeline.from_pretrained(pretrained_path, device_map="cpu", **kw)
+
+    # 按优先级: 本地路径 → 环境变量指定 → 默认 tiny
+    sources = []
+    if CHRONOS_LOCAL_PATH and os.path.isdir(CHRONOS_LOCAL_PATH):
+        sources.append(CHRONOS_LOCAL_PATH)
+    sources.append(CHRONOS_MODEL)
+
+    pipeline = None
+    last_err = ""
+    for src in sources:
+        try:
+            pipeline = _load(src, torch_dtype=_torch.float32)
+            break
+        except Exception as e:
+            last_err = str(e)[:200]
+            logger.info(f"  [Chronos] {src} 不可用: {last_err}")
+            continue
+
+    if pipeline is None:
+        logger.warning(f"  [Chronos] 所有来源均失败, 跳过基线 (最后错误: {last_err})")
+        return None, y_test, None, None
+
+    test_len = len(y_test)
+    # 检查模型能力: 某些chronos变体model_prediction_length可能低于test_len
+    max_pred_len = getattr(pipeline, 'model_prediction_length', test_len)
+    logger.info(f"  [Chronos] model_prediction_length={max_pred_len}, request={test_len}")
+
+    # Chronos 输入: 1D float tensor (可含零值, 不需要特殊预处理)
+    context = _torch.tensor(y_train.astype(np.float32), dtype=_torch.float32)
+    try:
+        # 如果模型单次预测长度不足，使用滚动预测
+        if max_pred_len < test_len:
+            logger.info(f"  [Chronos] 单次预测长度不足, 使用滚动预测")
+            _preds = []
+            _ctx = context.clone()
+            for _step in range(test_len):
+                step_quantiles = pipeline.predict_quantiles(
+                    _ctx, prediction_length=1, quantile_levels=[0.1, 0.5, 0.9])
+                if isinstance(step_quantiles, tuple):
+                    step_quantiles = step_quantiles[0]
+                step_vals = step_quantiles.numpy()[0, 0, :]  # shape (3,)
+                _preds.append(step_vals)
+                # 将本次预测的中位数追加到context用于下一步
+                _ctx = _torch.cat([_ctx, _torch.tensor([step_vals[1]], dtype=_torch.float32)])
+            quantile_preds = np.array(_preds)  # shape (test_len, 3)
+        else:
+            quantile_preds = pipeline.predict_quantiles(
+                context, prediction_length=test_len, quantile_levels=[0.1, 0.5, 0.9])
+            if isinstance(quantile_preds, tuple):
+                quantile_preds = quantile_preds[0]  # chronos 返回 (predictions, metadata) 元组
+            if hasattr(quantile_preds, 'numpy'):
+                quantile_preds = quantile_preds.numpy()
+            quantile_preds = quantile_preds[0]  # shape (test_len, n_quantiles)
+        y_pred_chronos = quantile_preds[:, 1]  # 中位数作为点预测
+        scrps = crps_score(y_test, quantile_preds)
+    except Exception as e:
+        logger.warning(f"  [Chronos] 预测失败: {e}, 回退到均值预测")
+        y_pred_chronos = np.full(test_len, np.mean(y_train))
+        scrps = None
+
+    y_pred_chronos = np.maximum(y_pred_chronos, 0)  # 物理约束: 需求量非负
+    logger.info(f"  [Chronos] 零样本完成, sCRPS={scrps}")
+    return y_pred_chronos, y_test, scrps, None
+
+def run_lightgbm(X_train_factors, y_train, X_test_factors, y_test, material):
     """LightGBM: 两阶段=分类×LGBM回归, 对比CatBoost"""
     try:
         import lightgbm as lgb
     except ImportError:
         return None, y_test
-    yp, _ = _two_stage_fit_predict(X_train_factors, y_train, X_test_factors,
-        lgb.LGBMRegressor(n_estimators=500, learning_rate=0.03, max_depth=5,
-            num_leaves=31, reg_alpha=1, reg_lambda=3, random_state=RANDOM_SEED, verbose=-1))
+    y_tr_log = np.log1p(y_train) if USE_LOG1P_TARGET else y_train
+    hp = get_hp('lightgbm', material)
+    yp, _ = _two_stage_fit_predict(X_train_factors, y_tr_log, X_test_factors,
+        lgb.LGBMRegressor(**hp, random_state=RANDOM_SEED, verbose=-1), material)
     if yp is None:
-        nv = min(12, len(y_train)//4)
-        reg = lgb.LGBMRegressor(n_estimators=500, learning_rate=0.03, max_depth=5,
-            num_leaves=31, reg_alpha=1, reg_lambda=3, random_state=RANDOM_SEED, verbose=-1)
-        reg.fit(X_train_factors[:-nv], y_train[:-nv], eval_set=[(X_train_factors[-nv:], y_train[-nv:])])
+        nv = min(12, len(y_tr_log)//4)
+        reg = lgb.LGBMRegressor(**hp, random_state=RANDOM_SEED, verbose=-1)
+        reg.fit(X_train_factors[:-nv], y_tr_log[:-nv], eval_set=[(X_train_factors[-nv:], y_tr_log[-nv:])])
         yp = np.maximum(reg.predict(X_test_factors), 0)
+    if USE_LOG1P_TARGET and yp is not None: yp = np.expm1(yp)
     return yp, y_test
 
 
@@ -1808,10 +1125,9 @@ def print_metrics_table(all_metrics):
     lines.append(header)
     lines.append("-" * 130)
 
-    MODEL_ORDER = ['CatBoost', 'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA', 'TSB', 'Croston-SBA',
-                    'Theta', 'SES', 'DLinear', 'DLinear-2S', 'ModernTCN', 'ModernTCN-2S',
-                    'CatBoost-2S', 'Ridge-2S', 'ElasticNet-2S', 'GP-2S',
-                    'CondCatBoost', 'NHiTS', 'LightGBM-pure', 'LightGBM', 'TwoStage']
+    MODEL_ORDER = ['CatBoost', 'CatBoost-Tweedie', 'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA',
+                    'Chronos', 'Croston-SBA', 'CatBoost-2S', 'Ridge-2S', 'ElasticNet-2S',
+                    'CondCatBoost', 'LightGBM', 'TwoStage', 'NHiTS']
     for material in MATERIALS:
         for i, model_name in enumerate(MODEL_ORDER):
             metrics = all_metrics[material].get(model_name, {})
@@ -1837,13 +1153,13 @@ def print_metrics_table(all_metrics):
 def main():
     # Step 1: 加载数据
     logger.info("=" * 70)
-    logger.info("  配电网物资需求预测 —— VMD-CatBoost 模型对比实验")
+    logger.info("  配电网物资需求预测 —— 两阶段预测模型对比实验")
     logger.info("  物资: Top5采购频率最高 (从ECP数据自动选择)")
     logger.info("  因子: 批次事件特征 + 项目数量 + 自回归滞后")
-    logger.info("  模型: CatBoost / Conditional-CatBoost / N-HiTS / TwoStage + NaiveSeasonal/Persistence/SARIMA")
+    logger.info("  模型: 15个 (树模型单/两阶段 + Tweedie + 线性 + 统计基线 + Chronos)")
     logger.info("=" * 70)
     logger.info(f"  日志文件: {log_filename}")
-    logger.info("[1/8] 加载数据...")
+    logger.info("[加载] 加载数据...")
     data_dict = load_or_generate_data()
 
     # 动态更新 MATERIALS 和 MATERIAL_LABELS
@@ -1868,7 +1184,7 @@ def main():
         for material in MATERIALS:
             label = MATERIAL_LABELS[material]
             logger.info("")
-            logger.info(f"[2/8] 处理 {label} ({material})...")
+            logger.info(f"[处理] {label} ({material})...")
             df = data_dict[material]
             # 注意: 不要在 preprocess_data 之前调用 get_top_factors(material)
             # 缓存机制会在首次调用时填充 fallback 值
@@ -1882,7 +1198,7 @@ def main():
             all_metrics[material] = {}
 
             # --- 模型一: CatBoost ---
-            logger.info(f"  [3/8] 模型一: CatBoost...")
+            logger.info("  [模型] CatBoost (两阶段)...")
             y_pred_1, y_test_1, imp_1, model_1 = run_catboost(
                 X_train_factors, y_train, X_test_factors, y_test, material)
             metrics_1 = evaluate_model(y_test_1, y_pred_1)
@@ -1891,6 +1207,15 @@ def main():
             all_metrics[material]['CatBoost'] = metrics_1
             logger.info(f"        MSE={metrics_1['MSE']:.4f} RMSE={metrics_1['RMSE']:.4f} "
                          f"MAE={metrics_1['MAE']:.4f} R2={metrics_1['R2']:.4f}")
+
+            # --- CatBoost-Tweedie 单阶段 (波动数据专项:   复合Poisson-Gamma) ---
+            y_pred_ctw, y_test_ctw, imp_ctw, model_ctw = run_catboost_tweedie(
+                X_train_factors, y_train, X_test_factors, y_test, material)
+            metrics_ctw = evaluate_model(y_test_ctw, y_pred_ctw)
+            all_results[material]['CatBoost-Tweedie'] = {'y_pred': y_pred_ctw, 'y_test': y_test_ctw, 'metrics': metrics_ctw}
+            all_metrics[material]['CatBoost-Tweedie'] = metrics_ctw
+            logger.info(f"  [模型] CatBoost-Tweedie: R2={metrics_ctw['R2']:.4f} "
+                         f"(vs RMSE Δ={metrics_ctw['R2']-metrics_1['R2']:+.4f})")
 
             # --- Baseline: Naive Seasonal ---
             y_pred_ns, y_test_ns = baseline_naive_seasonal(y_train, y_test)
@@ -1906,13 +1231,6 @@ def main():
             all_metrics[material]['NaiveMean'] = metrics_nm
             logger.info(f"  [Baseline] NaiveMean: R2={metrics_nm['R2']:.4f}")
 
-            # --- Baseline: TSB ---
-            y_pred_tsb, y_test_tsb = run_tsb(y_train, y_test)
-            metrics_tsb = evaluate_model(y_test_tsb, y_pred_tsb)
-            all_results[material]['TSB'] = {'y_pred': y_pred_tsb, 'y_test': y_test_tsb, 'metrics': metrics_tsb}
-            all_metrics[material]['TSB'] = metrics_tsb
-            logger.info(f"  [Baseline] TSB: R2={metrics_tsb['R2']:.4f}")
-
             # --- Baseline: Persistence ---
             y_pred_sp, y_test_sp = baseline_persistence(y_train, y_test)
             metrics_sp = evaluate_model(y_test_sp, y_pred_sp)
@@ -1927,29 +1245,27 @@ def main():
             all_metrics[material]['SARIMA'] = metrics_sa
             logger.info(f"  [Baseline] SARIMA: R2={metrics_sa['R2']:.4f}")
 
-            # --- 进阶模型: Conditional CatBoost (批次事件驱动) ---
-            logger.info(f"  [5/8] Conditional-CatBoost...")
             # --- CatBoost-2S (两阶段) ---
-            logger.info(f"  [5/8] CatBoost-2S...")
+            logger.info(f"  [两阶段] CatBoost-2S...")
             y_pred_cb2, y_test_cb2, imp_cb2, model_cb2 = run_catboost_2s(
                 X_train_factors, y_train, X_test_factors, y_test, material)
             metrics_cb2 = evaluate_model(y_test_cb2, y_pred_cb2)
             all_results[material]['CatBoost-2S'] = {'y_pred': y_pred_cb2, 'y_test': y_test_cb2, 'metrics': metrics_cb2}
             all_metrics[material]['CatBoost-2S'] = metrics_cb2
-            logger.info(f"  [5/8] CatBoost-2S: R2={metrics_cb2['R2']:.4f}")
+            logger.info(f"  [模型] CatBoost-2S: R2={metrics_cb2['R2']:.4f}")
 
-            # --- 进阶模型: Conditional CatBoost ---
-            logger.info(f"  [6/8] Conditional-CatBoost...")
+            # --- CondCatBoost ---
+            logger.info("  [模型] CondCatBoost...")
             y_pred_cc, y_test_cc, imp_cc, model_cc = run_conditional_catboost(
                 X_train_factors, y_train, X_test_factors, y_test, material)
-            metrics_cc = evaluate_model(y_test_cc, y_pred_cc)
+            metrics_cc = evaluate_model(y_test_cc, y_pred_cc, y_train=y_train)
             all_results[material]['CondCatBoost'] = {'y_pred': y_pred_cc, 'y_test': y_test_cc, 'metrics': metrics_cc}
             all_metrics[material]['CondCatBoost'] = metrics_cc
             logger.info(f"        MSE={metrics_cc['MSE']:.4f} RMSE={metrics_cc['RMSE']:.4f} "
                          f"MAE={metrics_cc['MAE']:.4f} R2={metrics_cc['R2']:.4f}")
 
-            # --- 进阶模型: N-HiTS ---
-            logger.info(f"  [6/8] N-HiTS...")
+            # --- N-HiTS ---
+            logger.info("  [模型] N-HiTS...")
             y_pred_nh, y_test_nh, imp_nh, model_nh = run_nhits(df, material)
             if y_pred_nh is not None:
                 metrics_nh = evaluate_model(y_test_nh, y_pred_nh)
@@ -1960,43 +1276,24 @@ def main():
             else:
                 logger.info(f"  [N-HiTS] 跳过 (未安装或失败)")
 
+            # --- Chronos 零样本基线 (TSFM通用性边界) ---
+            y_pred_ch, y_test_ch, scrps_ch, _ = baseline_chronos(y_train, y_test, material)
+            if y_pred_ch is not None:
+                metrics_ch = evaluate_model(y_test_ch, y_pred_ch, y_train=y_train)
+                if scrps_ch is not None:
+                    metrics_ch['sCRPS'] = scrps_ch
+                all_results[material]['Chronos'] = {'y_pred': y_pred_ch, 'y_test': y_test_ch, 'metrics': metrics_ch}
+                all_metrics[material]['Chronos'] = metrics_ch
+                logger.info(f"  [基线] Chronos: R2={metrics_ch['R2']:.4f}, sCRPS={scrps_ch}")
+            else:
+                logger.info(f"  [基线] Chronos: 跳过 (未安装)")
+
             # --- Croston-SBA 间歇性需求基线 ---
             y_pred_cr, y_test_cr = run_croston_sba(y_train, y_test)
             metrics_cr = evaluate_model(y_test_cr, y_pred_cr)
             all_results[material]['Croston-SBA'] = {'y_pred': y_pred_cr, 'y_test': y_test_cr, 'metrics': metrics_cr}
             all_metrics[material]['Croston-SBA'] = metrics_cr
             logger.info(f"  [基线] Croston-SBA: R2={metrics_cr['R2']:.4f}")
-
-            # --- DLinear ---
-            y_pred_dl, y_test_dl = run_dlinear(y_train, y_test)
-            metrics_dl = evaluate_model(y_test_dl, y_pred_dl)
-            all_results[material]['DLinear'] = {'y_pred': y_pred_dl, 'y_test': y_test_dl, 'metrics': metrics_dl}
-            all_metrics[material]['DLinear'] = metrics_dl
-
-            # --- DLinear-2S ---
-            y_pred_dl2, y_test_dl2 = run_dlinear_2s(y_train, y_test)
-            metrics_dl2 = evaluate_model(y_test_dl2, y_pred_dl2)
-            all_results[material]['DLinear-2S'] = {'y_pred': y_pred_dl2, 'y_test': y_test_dl2, 'metrics': metrics_dl2}
-            all_metrics[material]['DLinear-2S'] = metrics_dl2
-
-            # --- ModernTCN ---
-            y_pred_mt, y_test_mt = run_moderntcn(y_train, y_test)
-            metrics_mt = evaluate_model(y_test_mt, y_pred_mt)
-            all_results[material]['ModernTCN'] = {'y_pred': y_pred_mt, 'y_test': y_test_mt, 'metrics': metrics_mt}
-            all_metrics[material]['ModernTCN'] = metrics_mt
-
-            # --- ModernTCN-2S ---
-            y_pred_mt2, y_test_mt2 = run_moderntcn_2s(y_train, y_test)
-            metrics_mt2 = evaluate_model(y_test_mt2, y_pred_mt2)
-            all_results[material]['ModernTCN-2S'] = {'y_pred': y_pred_mt2, 'y_test': y_test_mt2, 'metrics': metrics_mt2}
-            all_metrics[material]['ModernTCN-2S'] = metrics_mt2
-
-            # --- LightGBM(朴素) ---
-            y_pred_lgp, y_test_lgp = run_lightgbm_pure(X_train_factors, y_train, X_test_factors, y_test)
-            if y_pred_lgp is not None:
-                metrics_lgp = evaluate_model(y_test_lgp, y_pred_lgp)
-                all_results[material]['LightGBM-pure'] = {'y_pred': y_pred_lgp, 'y_test': y_test_lgp, 'metrics': metrics_lgp}
-                all_metrics[material]['LightGBM-pure'] = metrics_lgp
 
             # --- LightGBM 对比 ---
             # --- TwoStage-Ridge ---
@@ -2006,7 +1303,7 @@ def main():
             all_metrics[material]['Ridge-2S'] = metrics_rd
 
             # --- LightGBM 对比 ---
-            y_pred_lgb, y_test_lgb = run_lightgbm(X_train_factors, y_train, X_test_factors, y_test)
+            y_pred_lgb, y_test_lgb = run_lightgbm(X_train_factors, y_train, X_test_factors, y_test, material)
             if y_pred_lgb is not None:
                 metrics_lgb = evaluate_model(y_test_lgb, y_pred_lgb)
                 all_results[material]['LightGBM'] = {'y_pred': y_pred_lgb, 'y_test': y_test_lgb, 'metrics': metrics_lgb}
@@ -2016,7 +1313,7 @@ def main():
                 logger.info(f"  [LightGBM] lightgbm未安装, 跳过")
 
             # --- 两阶段预测 (Stage1分类 + Stage2回归) ---
-            logger.info(f"  [7/8] 两阶段预测...")
+            logger.info("  [模型] TwoStage (独立实现)...")
             y_pred_ts, y_test_ts, imp_ts, model_ts = run_two_stage(
                 df, X_train_factors, y_train, X_test_factors, y_test, material)
             metrics_ts = evaluate_model(y_test_ts, y_pred_ts)
@@ -2025,32 +1322,11 @@ def main():
             logger.info(f"        MSE={metrics_ts['MSE']:.4f} RMSE={metrics_ts['RMSE']:.4f} "
                          f"MAE={metrics_ts['MAE']:.4f} R2={metrics_ts['R2']:.4f}")
 
-            # --- Theta ---
-            y_pred_th, y_test_th = run_theta(y_train, y_test)
-            metrics_th = evaluate_model(y_test_th, y_pred_th)
-            all_results[material]['Theta'] = {'y_pred': y_pred_th, 'y_test': y_test_th, 'metrics': metrics_th}
-            all_metrics[material]['Theta'] = metrics_th
-
-            # --- SES ---
-            y_pred_ses, y_test_ses = run_ses(y_train, y_test)
-            metrics_ses = evaluate_model(y_test_ses, y_pred_ses)
-            all_results[material]['SES'] = {'y_pred': y_pred_ses, 'y_test': y_test_ses, 'metrics': metrics_ses}
-            all_metrics[material]['SES'] = metrics_ses
-
             # --- ElasticNet-2S ---
             y_pred_en, y_test_en, _, _ = run_elasticnet_2s(X_train_factors, y_train, X_test_factors, y_test, material)
             metrics_en = evaluate_model(y_test_en, y_pred_en)
             all_results[material]['ElasticNet-2S'] = {'y_pred': y_pred_en, 'y_test': y_test_en, 'metrics': metrics_en}
             all_metrics[material]['ElasticNet-2S'] = metrics_en
-
-            # --- GaussianProcess-2S ---
-            y_pred_gp, y_test_gp, _, _ = run_gp_2s(X_train_factors, y_train, X_test_factors, y_test, material)
-            metrics_gp = evaluate_model(y_test_gp, y_pred_gp)
-            all_results[material]['GP-2S'] = {'y_pred': y_pred_gp, 'y_test': y_test_gp, 'metrics': metrics_gp}
-            all_metrics[material]['GP-2S'] = metrics_gp
-
-            # --- VMD-CatBoost / VMD-Transformer-CatBoost / VMD-SVR ---
-            # [DISABLED] 循环论证: VMD分解y->IMF作特征->预测y, Sigma(IMF)~=y
 
             # 特征重要性图
             imp_dict = {
@@ -2060,7 +1336,7 @@ def main():
 
         # Step 4: 评估汇总
         logger.info('')
-        logger.info('[8/8] 汇总评估与可视化...')
+        logger.info('[汇总] 评估与可视化...')
         print_metrics_table(all_metrics)
 
         # 保存指标 JSON
