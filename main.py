@@ -111,10 +111,11 @@ DATA_LOCKED = True  # 严格模式 — 数据由外部手动生成，禁止自�
 USE_QUARTER_DUMMIES = False  # 方案A: 行政季度末哑变量。实验确认无显著收益(ΔR²=-0.0046), 已关闭
 
 # ===================== 可取消的实验开关 (设为True启用/False回退) =====================
-USE_EVENT_FEATURES = False   # 实验1: 事件保持特征(SHOS)
+USE_EVENT_FEATURES = True    # 实验1: 事件保持特征(SHOS) — EVT事件特征ON
 USE_POOLED_TRAINING = False  # 实验2: 相似性聚类池化
 USE_LOG1P_TARGET = False     # 实验3: Y对数变换
 USE_QUANTILE_REGR = False    # 实验4: 分位数回归
+USE_PLAN_FEATURES = False    # 实验5: 采购计划特征(需更细粒度计划数据, 当前批次月≈常数, 信号弱)
 
 # ===================== 0. 每物资超参数配置 =====================
 # 两层字典: HP_DEFAULTS[model_key] = 默认参数; HP_OVERRIDES[model_key][material_substr] = 覆盖值
@@ -292,6 +293,133 @@ def load_or_generate_data():
     raise FileNotFoundError(f"无法生成数据文件: {DATA_FILE}")
 
 
+# ===================== 1.5 采购预安排数据加载 =====================
+_plan_cache = None
+
+
+def load_procurement_plan():
+    """加载SGCC年度采购预安排JSON。缓存后复用。"""
+    global _plan_cache
+    if _plan_cache is not None:
+        return _plan_cache
+    plan_path = os.path.join(DATA_DIR, 'procurement_plan.json')
+    if os.path.exists(plan_path):
+        with open(plan_path, 'r', encoding='utf-8') as f:
+            _plan_cache = json.load(f)
+        logger.info(f"  [采购计划] 已加载: {plan_path}")
+        return _plan_cache
+    logger.warning(f"  [采购计划] 文件不存在: {plan_path}, 计划特征将退化为纯历史统计")
+    return {}
+
+
+def get_plan_for_month(plan_data, year, month):
+    """获取指定年月的采购计划信息。plan_data = procurement_plan.json的完整dict。"""
+    yr_key = str(year)
+    m_key = str(month)
+    yr_data = plan_data.get(yr_key, {})
+    return yr_data.get('monthly_schedule', {}).get(m_key, {})
+
+
+def _get_best_plan_year(plan_data, target_year):
+    """返回plan_data中最接近target_year的年份key（SGCC批次模式跨年稳定）。"""
+    years = sorted([int(k) for k in plan_data.keys() if k.isdigit()])
+    if target_year in years:
+        return str(target_year)
+    # 找最近的年份
+    best = min(years, key=lambda y: abs(y - target_year))
+    return str(best)
+
+
+def make_plan_features_train(demand_train, train_start_date, plan_data):
+    """训练集: 使用采购计划数据（与测试集同源），确保train/test分布一致。
+    不使用实际需求数据——避免训练时'未来事件=真实需求'的信息泄露。
+    """
+    n = len(demand_train)
+    cal_months = np.array([(train_start_date.month + i - 1) % 12 + 1 for i in range(n)])
+    cal_years = np.array([train_start_date.year + (train_start_date.month + i - 1) // 12 for i in range(n)])
+
+    plan_evt_this = np.zeros(n)
+    plan_cnt_3m = np.zeros(n)
+    plan_cnt_6m = np.zeros(n)
+    plan_gap = np.zeros(n)
+    plan_is_batch = np.zeros(n)
+
+    for i in range(n):
+        m = cal_months[i]; y = cal_years[i]
+        # 使用对应年份的计划数据（可能fallback到最近年份）
+        yr_key = _get_best_plan_year(plan_data, y)
+        pinfo = get_plan_for_month(plan_data, yr_key, m)
+        has_b = pinfo.get('has_material_batch', False)
+        plan_evt_this[i] = float(has_b)
+        plan_is_batch[i] = float(has_b)
+
+        cnt3 = 0; cnt6 = 0; gap = 999
+        for j in range(6):
+            fut_i = i + j
+            if fut_i < n:
+                fut_m = cal_months[fut_i]; fut_y = cal_years[fut_i]
+            else:
+                fut_m = m + j
+                fut_y = y
+                while fut_m > 12: fut_m -= 12; fut_y += 1
+            yr_key_f = _get_best_plan_year(plan_data, fut_y)
+            p = get_plan_for_month(plan_data, yr_key_f, fut_m)
+            hb = float(p.get('has_material_batch', False))
+            cnt6 += hb
+            if j < 3: cnt3 += hb
+            if hb and gap == 999: gap = j
+        plan_cnt_3m[i] = cnt3
+        plan_cnt_6m[i] = cnt6
+        plan_gap[i] = min(gap, 12)
+
+    return plan_evt_this, plan_cnt_3m, plan_cnt_6m, plan_gap, plan_is_batch
+
+
+def make_plan_features_test(demand_train, train_start_date, test_months, plan_data):
+    """测试集: 与训练集使用相同的采购计划数据源。
+    训练/测试分布一致——都从plan_data计算，不涉及实际需求。
+    """
+    n_train = len(demand_train)
+    n_test = len(test_months)
+
+    plan_evt_this = np.zeros(n_test)
+    plan_cnt_3m = np.zeros(n_test)
+    plan_cnt_6m = np.zeros(n_test)
+    plan_gap = np.zeros(n_test)
+    plan_is_batch = np.zeros(n_test)
+
+    test_cal_years = np.array([train_start_date.year + (train_start_date.month + n_train + i - 1) // 12 for i in range(n_test)])
+    test_cal_months = np.array([(train_start_date.month + n_train + i - 1) % 12 + 1 for i in range(n_test)])
+
+    for i in range(n_test):
+        m = test_cal_months[i]; y = test_cal_years[i]
+        yr_key = _get_best_plan_year(plan_data, y)
+        pinfo = get_plan_for_month(plan_data, yr_key, m)
+        has_b = pinfo.get('has_material_batch', False)
+        plan_evt_this[i] = float(has_b)
+        plan_is_batch[i] = float(has_b)
+
+        cnt3 = 0; cnt6 = 0; gap = 999
+        for j in range(6):
+            idx = i + j
+            if idx < n_test:
+                fut_m = test_cal_months[idx]; fut_y = test_cal_years[idx]
+            else:
+                fut_m = m + j; fut_y = y
+                while fut_m > 12: fut_m -= 12; fut_y += 1
+            yr_key_f = _get_best_plan_year(plan_data, fut_y)
+            p = get_plan_for_month(plan_data, yr_key_f, fut_m)
+            hb = float(p.get('has_material_batch', False))
+            cnt6 += hb
+            if j < 3: cnt3 += hb
+            if hb and gap == 999: gap = j
+        plan_cnt_3m[i] = cnt3
+        plan_cnt_6m[i] = cnt6
+        plan_gap[i] = min(gap, 12)
+
+    return plan_evt_this, plan_cnt_3m, plan_cnt_6m, plan_gap, plan_is_batch
+
+
 # ===================== 2. Top-4 影响因子（基于Spearman动态计算） =====================
 _top_factors_cache = {}
 
@@ -383,6 +511,23 @@ def preprocess_data(df, material):
         # 注: last_evt_mag/evt_trend/evt_cv 在测试集为常数(仅复制训练集最后值), 已移除
         evt_feats_tr = [gap_since_last, evt_cnt_6m, evt_cnt_12m, cumul_12m, month_freq]
 
+    # 实验5: 采购计划特征 (计划预安排→确定性批次月)
+    plan_feats_tr = []
+    plan_feats_te = []
+    if USE_PLAN_FEATURES:
+        plan_data = load_procurement_plan()
+        if plan_data:
+            train_start = df['date'].iloc[0]
+            test_months = np.array([(train_start.month + train_len + i - 1) % 12 + 1 for i in range(N_TEST)])
+            # 训练集计划特征
+            p_evt_this_tr, p_cnt3_tr, p_cnt6_tr, p_gap_tr, p_is_batch_tr = \
+                make_plan_features_train(demand_train, train_start, plan_data)
+            plan_feats_tr = [p_evt_this_tr, p_cnt3_tr, p_cnt6_tr, p_gap_tr, p_is_batch_tr]
+            # 测试集计划特征
+            p_evt_this_te, p_cnt3_te, p_cnt6_te, p_gap_te, p_is_batch_te = \
+                make_plan_features_test(demand_train, train_start, test_months, plan_data)
+            plan_feats_te = [p_evt_this_te, p_cnt3_te, p_cnt6_te, p_gap_te, p_is_batch_te]
+
     # 方案A: 季度末哑变量
     qtr_end_cols = []
     if USE_QUARTER_DUMMIES:
@@ -397,7 +542,7 @@ def preprocess_data(df, material):
         is_zero_lag1_tr, is_zero_lag12_tr,
         np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12),
         np.sin(2*np.pi*q_train/4), np.cos(2*np.pi*q_train/4),
-    ] + evt_feats_tr + qtr_end_cols)
+    ] + evt_feats_tr + qtr_end_cols + plan_feats_tr)
 
     # Step 3: 特征Scaler仅对训练集fit
     feature_scaler = MinMaxScaler()
@@ -438,7 +583,6 @@ def preprocess_data(df, material):
         for i in range(nt):
             past_same = [j for j in range(tl+i) if cal_m_all[j]==cal_m_all[tl+i]]
             if past_same: mf_te[i] = np.mean(d_all[past_same] > 0)
-        # 注: last_evt_mag/evt_trend/evt_cv 在测试集为常数, 已移除
         evt_feats_te = [gap_sl_te, ec6_te, ec12_te, cu12_te, mf_te]
 
     qtr_end_cols_te = []
@@ -454,12 +598,13 @@ def preprocess_data(df, material):
         is_zero_lag1_te, is_zero_lag12_te,
         np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12),
         np.sin(2*np.pi*q_test/4), np.cos(2*np.pi*q_test/4),
-    ] + evt_feats_te + qtr_end_cols_te)
+    ] + evt_feats_te + qtr_end_cols_te + plan_feats_te)
     X_test = feature_scaler.transform(X_test_raw)
     y_test = demand_test.copy()
 
     logger.info(f"  [特征工程] top4={top4}, n_feat={X_train.shape[1]}维, 训练={train_len}月"
                 + (" [事件特征ON]" if USE_EVENT_FEATURES else "")
+                + (" [计划特征ON]" if USE_PLAN_FEATURES else "")
                 + (" [log1p]" if USE_LOG1P_TARGET else ""))
     return X_train, y_train, X_test, y_test, feature_scaler
 
