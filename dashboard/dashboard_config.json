@@ -1,0 +1,152 @@
+{
+  "$schema": "./schemas/config_schema.json",
+  "version": "1.0",
+  "theme": "dark",
+  "title": "电力配电网物资需求预测看板",
+  "subtitle": "多物资 × 多模型 · 12期预测",
+  "layout": {
+    "columns": 12,
+    "row_height": 80,
+    "gap": 12,
+    "padding": 16
+  },
+  "panels": [
+    {
+      "id": "gauge_r2",
+      "type": "gauge",
+      "title": "整体 R² 均值",
+      "grid": {"col": 1, "row": 1, "col_span": 2, "row_span": 2},
+      "data_binding": {
+        "value": "$.aggregations.model_avg_metrics.*.R2 | mean | round(3)",
+        "label": "R² Score"
+      },
+      "options": {
+        "min": 0, "max": 1,
+        "thresholds": [
+          {"value": 0.6, "color": "#f5222d"},
+          {"value": 0.8, "color": "#faad14"},
+          {"value": 0.9, "color": "#52c41a"}
+        ]
+      }
+    },
+    {
+      "id": "gauge_mape",
+      "type": "gauge",
+      "title": "整体 sMAPE 均值",
+      "grid": {"col": 3, "row": 1, "col_span": 2, "row_span": 2},
+      "data_binding": {
+        "value": "$.aggregations.model_avg_metrics.*.sMAPE | mean | round(2)",
+        "label": "sMAPE %"
+      },
+      "options": {
+        "min": 0, "max": 100,
+        "thresholds": [
+          {"value": 10, "color": "#52c41a"},
+          {"value": 25, "color": "#faad14"},
+          {"value": 50, "color": "#f5222d"}
+        ],
+        "inverse": true
+      }
+    },
+    {
+      "id": "summary_panel",
+      "type": "markdown_panel",
+      "title": "AI 分析总结",
+      "grid": {"col": 5, "row": 1, "col_span": 8, "row_span": 2},
+      "data_binding": {
+        "content": "$.__context__.summary"
+      },
+      "options": {
+        "font_size": 13,
+        "max_height": 140
+      }
+    },
+    {
+      "id": "heatmap_r2",
+      "type": "heatmap",
+      "title": "物资 × 模型 R² 热力图",
+      "grid": {"col": 1, "row": 3, "col_span": 12, "row_span": 3},
+      "data_binding": {
+        "x_axis": "$.meta.models",
+        "y_axis": "$.meta.materials",
+        "metric": "R2"
+      },
+      "options": {
+        "color_range": ["#f5222d", "#faad14", "#52c41a"],
+        "min": 0, "max": 1,
+        "show_value": true
+      }
+    },
+    {
+      "id": "line_material_${material_id}",
+      "type": "line_chart",
+      "title": "${material} - 多模型预测对比",
+      "repeat": {
+        "foreach": "$.meta.materials",
+        "as": "material",
+        "id_suffix": "material_id"
+      },
+      "grid": {"col": 1, "row": "auto", "col_span": 12, "row_span": 4},
+      "data_binding": {
+        "series": "$.results.${material}.*.y_pred",
+        "y_test": "$.results.${material}.__y_test__",
+        "x_axis": "$.meta.time_labels",
+        "top_n": 15,
+        "rank_by": "R2"
+      },
+      "options": {
+        "show_legend": true,
+        "smooth": true,
+        "y_test_style": "dashed_scatter",
+        "data_zoom": true
+      }
+    },
+    {
+      "id": "rank_table_r2",
+      "type": "rank_table",
+      "title": "模型综合排名（按R²）",
+      "grid": {"col": 1, "row": 21, "col_span": 4, "row_span": 3},
+      "data_binding": {
+        "metric": "R2",
+        "sort": "desc",
+        "top_n": 10,
+        "group_by": "model"
+      },
+      "options": {
+        "columns": ["排名", "模型", "R²均值", "最佳物资", "最差物资"],
+        "highlight_top": 3
+      }
+    },
+    {
+      "id": "bar_material_r2",
+      "type": "bar_chart",
+      "title": "各物资最佳模型 R² 对比",
+      "grid": {"col": 5, "row": 21, "col_span": 4, "row_span": 3},
+      "data_binding": {
+        "categories": "$.meta.materials",
+        "values": "$.aggregations.best_model_per_material.*.value"
+      },
+      "options": {
+        "horizontal": false,
+        "show_value": true,
+        "color": "#1890ff"
+      }
+    },
+    {
+      "id": "bar_model_mae",
+      "type": "bar_chart",
+      "title": "各模型 MAE 均值对比",
+      "grid": {"col": 9, "row": 21, "col_span": 4, "row_span": 3},
+      "data_binding": {
+        "categories": "$.meta.models",
+        "values": "$.aggregations.model_avg_metrics.*.MAE"
+      },
+      "options": {
+        "horizontal": true,
+        "show_value": true,
+        "color": "#722ed1",
+        "sort": "asc"
+      }
+    }
+  ]
+}

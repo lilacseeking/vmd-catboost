@@ -1,0 +1,24 @@
+{
+  "baseline": {
+    "r2": 0.6799448458449987,
+    "mape": 102.2496698560825,
+    "rmse": 485.73199767453144,
+    "mae": 336.19262972410235,
+    "pass_ratio": 0.0,
+    "data_version": "v0",
+    "model_version": "baseline",
+    "date": "2026-07-20"
+  },
+  "current_best": {
+    "r2": 0.6799448458449987,
+    "mape": 102.2496698560825,
+    "rmse": 485.73199767453144,
+    "mae": 336.19262972410235,
+    "pass_ratio": 0.0,
+    "data_version": "v0",
+    "model_version": "baseline",
+    "date": "2026-07-20",
+    "source_round": "baseline"
+  },
+  "rounds": []
+}

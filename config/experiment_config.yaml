@@ -1,0 +1,268 @@
+# ============================================================
+# 电力物资需求预测 · 实验开关配置
+# 规则：
+#   - 每个开关含 enabled / description / source_round / delta
+#   - 经验证正向且稳健 → enabled: true
+#   - 不稳定/有副作用/仅探索 → enabled: false（代码保留，可一键打开）
+#   - 超参持久化文件路径统一在 paths 区配置
+# ============================================================
+
+global:
+  random_seed: 42
+  mock_mode: false            # true=看板mock(带水印), false=真实管道
+  validation_protocol:
+    split_method: "time_series"   # 禁止 random
+    train_months: 69              # 前69月训练 (81-12=69)
+    test_months: 12               # 后12月测试
+    forbid_leakage: true
+    test_set_usage: "final_only"
+  metrics: [r2, mape, rmse, mae]
+  materials:
+    - "交流避雷器"
+    - "电容式电压互感器"
+    - "交流支柱绝缘子"
+    - "断路器保护"
+    - "电抗器保护"
+  skip_materials:
+    - name: "电抗器保护"
+      reason: "R²<0.05, 样本噪声主导, 无优化空间"
+      source_round: 0
+
+paths:
+  data_dir: "inputs/"
+  data_file: "inputs/data.xlsx"
+  model_artifacts_dir: "artifacts/models/"
+  hyperparams_dir: "artifacts/hyperparams/"
+  experiment_log_dir: "experiments/"
+  dashboard_data_dir: "artifacts/dashboard/"
+  baseline_report: "experiments/baseline_report.json"
+  output_figures: "outputs/figures/"
+  output_logs: "outputs/logs/"
+
+model_switches:
+  # === 已有模型（当前代码中已实现）===
+  catboost_direct:
+    enabled: true
+    description: "CatBoost单阶段直接回归(消融基线)"
+    params_key: "catboost_direct"
+    source_round: 0
+    delta: null
+
+  catboost_tweedie:
+    enabled: true
+    description: "CatBoost-Tweedie单阶段(复合Poisson-Gamma损失)"
+    params_key: "catboost_tweedie"
+    source_round: 0
+    delta: null
+
+  catboost_2s:
+    enabled: true
+    description: "CatBoost两阶段(Stage1分类×Stage2回归)"
+    params_key: "catboost_2s"
+    source_round: 0
+    delta: null
+
+  cond_catboost:
+    enabled: true
+    description: "CondCatBoost(两阶段×更深CatBoost)"
+    params_key: "cond_catboost"
+    source_round: 0
+    delta: null
+
+  twostage:
+    enabled: true
+    description: "TwoStage独立实现(Stage1分类+Stage2回归)"
+    params_key: "twostage_cls/twostage_reg"
+    source_round: 0
+    delta: null
+
+  ridge_2s:
+    enabled: true
+    description: "Ridge两阶段(小样本更稳定)"
+    params_key: "ridge_2s"
+    source_round: 0
+    delta: null
+
+  elasticnet_2s:
+    enabled: true
+    description: "ElasticNet两阶段(L1+L2强正则)"
+    params_key: "elasticnet_2s"
+    source_round: 0
+    delta: null
+
+  lightgbm:
+    enabled: false
+    description: "LightGBM两阶段(未安装,待启用)"
+    params_key: "lightgbm"
+    source_round: 0
+    delta: null
+    note: "lightgbm未安装, pip install lightgbm后启用"
+
+  nhits:
+    enabled: false
+    description: "N-HiTS多尺度层次化预测(PyTorch原生)"
+    source_round: 0
+    delta: null
+    note: "当前样本量33<50,需数据增强后启用"
+
+  # === 基线模型 ===
+  naive_seasonal:
+    enabled: true
+    description: "季节性朴素预测(抄去年同期)"
+    source_round: 0
+    delta: null
+
+  naive_mean:
+    enabled: true
+    description: "历史均值预测"
+    source_round: 0
+    delta: null
+
+  persistence:
+    enabled: true
+    description: "持久性预测(抄上月)"
+    source_round: 0
+    delta: null
+
+  sarima:
+    enabled: true
+    description: "SARIMA(1,0,1)(1,0,1,12)"
+    source_round: 0
+    delta: null
+
+  croston_sba:
+    enabled: true
+    description: "Croston-SBA间歇性需求专用"
+    source_round: 0
+    delta: null
+
+  chronos:
+    enabled: false
+    description: "Chronos零样本TSFM基线(未安装)"
+    source_round: 0
+    delta: null
+    note: "chronos-forecasting未安装"
+
+  # === 候选模型（迭代时按需打开）===
+  xgboost:
+    enabled: false
+    description: "XGBoost候选"
+    source_round: null
+    delta: null
+
+  svr:
+    enabled: false
+    description: "SVR小样本候选"
+    source_round: null
+    delta: null
+
+  prophet:
+    enabled: false
+    description: "Prophet时序预测"
+    source_round: null
+    delta: null
+
+  # === 融合/容器层 ===
+  ensemble_fusion:
+    enabled: false
+    description: "多模型加权融合层"
+    params:
+      method: "weighted_average"   # weighted_average / stacking / attention
+      weights_file: "artifacts/hyperparams/ensemble_weights.yaml"
+    source_round: null
+    delta: null
+
+  residual_correction:
+    enabled: false
+    description: "残差修正"
+    source_round: null
+    delta: null
+
+  per_material_hyperparams:
+    enabled: true
+    description: "不同物资各自最优超参(已实现HP_OVERRIDES)"
+    hyperparams_index: "artifacts/hyperparams/material_index.yaml"
+    source_round: 0
+    delta: null
+
+# === 数据侧开关 ===
+data_switches:
+  event_features:
+    enabled: true
+    description: "事件保持特征(SHOS): gap_since_last/evt_cnt_6m/evt_cnt_12m/cumul_12m/month_freq"
+    source_round: 0
+    delta: "+R²约0.05(历史验证)"
+
+  pooled_training:
+    enabled: false
+    description: "相似性聚类池化训练"
+    source_round: 0
+    delta: "未验证"
+
+  log1p_target:
+    enabled: false
+    description: "Y对数变换(log1p/expm1)"
+    source_round: 0
+    delta: "未验证"
+
+  quantile_regression:
+    enabled: false
+    description: "分位数回归(alpha=0.1/0.5/0.9)"
+    source_round: 0
+    delta: "未验证"
+
+  magnitude_features:
+    enabled: false
+    description: "量级特征(lag-1): n_packages/n_sub_bids/n_orgs/n_items/avg_item_qty/max_item_qty"
+    source_round: 0
+    delta: "泄漏版R²虚高+0.28, 无泄漏版Δ=-0.02"
+    note: "已确认无泄漏版无正向收益,默认关闭"
+
+  quarter_dummies:
+    enabled: false
+    description: "行政季度末哑变量"
+    source_round: 0
+    delta: "ΔR²=-0.0046, 无显著收益"
+
+  single_source_procurement:
+    enabled: false
+    description: "ECP单一来源采购事前公示数据"
+    source_round: null
+    delta: null
+
+  annual_procurement_plan:
+    enabled: false
+    description: "年度采购计划预安排"
+    source_round: null
+    delta: null
+
+  project_budget:
+    enabled: false
+    description: "项目投资预算数据"
+    source_round: null
+    delta: null
+
+  contract_service:
+    enabled: false
+    description: "ECP合同服务页数据(含合同金额)"
+    source_round: null
+    delta: null
+
+  agreement_inventory:
+    enabled: false
+    description: "ECP协议库存执行情况"
+    source_round: null
+    delta: null
+
+  new_impact_factors:
+    enabled: false
+    description: "新影响因子(季节/工程周期/政策/价格等)"
+    source_round: null
+    delta: null
+
+# === 看板开关 ===
+dashboard:
+  enabled: true
+  refresh_mode: "event_driven"    # event_driven / polling
+  mock_mode: false
+  contract_file: "config/v2_contract.json"   # v2契约解析表路径

@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Dashboard Configuration",
+  "type": "object",
+  "required": ["version", "title", "layout", "panels"],
+  "properties": {
+    "version": {"type": "string", "pattern": "^\\d+\\.\\d+$"},
+    "theme": {"type": "string", "default": "dark"},
+    "title": {"type": "string", "minLength": 1},
+    "subtitle": {"type": "string"},
+    "layout": {
+      "type": "object",
+      "required": ["columns", "row_height"],
+      "properties": {
+        "columns": {"type": "integer", "minimum": 1, "maximum": 24, "default": 12},
+        "row_height": {"type": "integer", "minimum": 40, "default": 80},
+        "gap": {"type": "integer", "minimum": 0, "default": 12},
+        "padding": {"type": "integer", "minimum": 0, "default": 16}
+      }
+    },
+    "panels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "title", "grid", "data_binding"],
+        "properties": {
+          "id": {"type": "string"},
+          "type": {"type": "string", "minLength": 1},
+          "title": {"type": "string"},
+          "grid": {
+            "type": "object",
+            "required": ["col", "row", "col_span", "row_span"],
+            "properties": {
+              "col": {"type": "integer", "minimum": 1},
+              "row": {},
+              "col_span": {"type": "integer", "minimum": 1},
+              "row_span": {"type": "integer", "minimum": 1}
+            }
+          },
+          "data_binding": {"type": "object"},
+          "options": {"type": "object"},
+          "repeat": {
+            "type": "object",
+            "required": ["foreach", "as"],
+            "properties": {
+              "foreach": {"type": "string"},
+              "as": {"type": "string"},
+              "id_suffix": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

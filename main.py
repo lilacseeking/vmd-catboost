@@ -99,6 +99,14 @@ def suppress_font_stderr():
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+# === 【Dashboard插入点1】安全导入 ===
+try:
+    from dashboard import DashboardBuilder, ResultCollector
+    DASHBOARD_AVAILABLE = True
+except ImportError as e:
+    DASHBOARD_AVAILABLE = False
+    print(f"[Warning] Dashboard模块不可用: {e}")
+
 # ===================== 全局配置 =====================
 MATERIALS = []  # 动态从 data.xlsx sheet 名加载
 MATERIAL_LABELS = {}
@@ -226,13 +234,27 @@ if '--data' in sys.argv:
     idx = sys.argv.index('--data')
     DATA_FILE = os.path.join(DATA_DIR, sys.argv[idx+1])
 
+# === 【Dashboard插入点2】命令行参数 ===
+NO_DASHBOARD = '--no-dashboard' in sys.argv
+DASHBOARD_CONFIG = None
+DASHBOARD_OUTPUT = None
+DASHBOARD_DEBUG = '--dashboard-debug' in sys.argv
+if '--dashboard-config' in sys.argv:
+    _idx = sys.argv.index('--dashboard-config')
+    DASHBOARD_CONFIG = sys.argv[_idx + 1]
+if '--dashboard-output' in sys.argv:
+    _idx = sys.argv.index('--dashboard-output')
+    DASHBOARD_OUTPUT = sys.argv[_idx + 1]
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # ---- 日志系统 ----
-log_filename = os.path.join(LOG_DIR, f'main_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+# 运行时间戳：日志文件与看板输出文件共享同一编号，便于关联追溯
+RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_filename = os.path.join(LOG_DIR, f'main_{RUN_TIMESTAMP}.log')
 logger = logging.getLogger('vmd_catboost')
 logger.setLevel(logging.DEBUG)
 
@@ -702,11 +724,15 @@ def plot_feature_importance(importance_dict, material):
 
 def plot_metrics_comparison(all_metrics):
     """模型指标对比：分组柱状图（各物资各模型的四项指标）"""
+    # 仅使用实际有预测结果的物资（跳过被SKIP_REACTOR_PROTECT等开关排除的）
+    active_materials = [m for m in MATERIALS if m in all_metrics]
+    if not active_materials:
+        return
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     metric_names = ['MSE', 'RMSE', 'MAE', 'R2']
     # Dynamically collect all model names from results
     model_names = []
-    for material in MATERIALS:
+    for material in active_materials:
         for m in all_metrics[material]:
             if m not in model_names:
                 model_names.append(m)
@@ -714,12 +740,12 @@ def plot_metrics_comparison(all_metrics):
 
     for ax_idx, metric in enumerate(metric_names):
         ax = axes[ax_idx // 2, ax_idx % 2]
-        x = np.arange(len(MATERIALS))
+        x = np.arange(len(active_materials))
         width = 0.8 / max(len(model_names), 1)
 
         for i, model_name in enumerate(model_names):
             values = []
-            for material in MATERIALS:
+            for material in active_materials:
                 vals = all_metrics[material].get(model_name, {})
                 values.append(vals.get(metric, 0))
             bars = ax.bar(x + i * width, values, width, label=model_name,
@@ -732,7 +758,7 @@ def plot_metrics_comparison(all_metrics):
 
         ax.set_title(metric, fontsize=14, fontweight='bold')
         ax.set_xticks(x + width * (len(model_names) - 1) / 2)
-        ax.set_xticklabels([MATERIAL_LABELS[m] for m in MATERIALS])
+        ax.set_xticklabels([MATERIAL_LABELS[m] for m in active_materials])
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3, axis='y')
 
@@ -1198,6 +1224,8 @@ def print_metrics_table(all_metrics):
                     'Chronos', 'Croston-SBA', 'CatBoost-2S', 'Ridge-2S', 'ElasticNet-2S',
                     'CondCatBoost', 'LightGBM', 'TwoStage', 'NHiTS']
     for material in MATERIALS:
+        if material not in all_metrics:
+            continue  # 被SKIP_REACTOR_PROTECT等开关跳过的物资
         for i, model_name in enumerate(MODEL_ORDER):
             metrics = all_metrics[material].get(model_name, {})
             if metrics:
@@ -1244,6 +1272,15 @@ def main():
     # Step 2: 初始化结果容器
     all_results = {}
     all_metrics = {}
+
+    # === 【Dashboard插入点3】初始化数据收集器 ===
+    collector = ResultCollector() if DASHBOARD_AVAILABLE else None
+    if collector:
+        collector.set_meta(
+            time_labels=["1月", "2月", "3月", "4月", "5月", "6月",
+                         "7月", "8月", "9月", "10月", "11月", "12月"],
+            forecast_horizon=12
+        )
 
     # Step 3+4：建模与可视化（抑制 Windows 字体权限错误噪音）
     with suppress_font_stderr():
@@ -1415,10 +1452,33 @@ def main():
         # 保存指标 JSON
         metrics_json = {}
         for material in MATERIALS:
+            if material not in all_results:
+                continue
             plot_prediction_comparison(all_results, material)
 
         # 指标对比柱状图
         plot_metrics_comparison(all_metrics)
+
+    # === 【Dashboard插入点4+5】批量收集结果并生成看板 ===
+    if collector:
+        for material in all_results:
+            for model_name, result_dict in all_results[material].items():
+                collector.collect(material, model_name, result_dict)
+    if collector and not NO_DASHBOARD:
+        # 看板文件名与日志文件共享同一时间戳编号，便于关联追溯
+        dashboard_output = DASHBOARD_OUTPUT or os.path.join(
+            'output', f'dashboard_{RUN_TIMESTAMP}.html')
+        try:
+            DashboardBuilder(
+                collector=collector,
+                config_path=DASHBOARD_CONFIG,
+                output_path=dashboard_output,
+                debug=DASHBOARD_DEBUG
+            ).build()
+        except Exception as e:
+            print(f"[Warning] 看板生成失败（不影响预测结果）: {e}")
+            import traceback
+            traceback.print_exc()
 
     # 最佳模型识别（纯日志输出，无需抑制）
     logger.info("")
@@ -1426,6 +1486,8 @@ def main():
     logger.info("  模型性能排序 (按R^2)")
     logger.info("=" * 70)
     for material in MATERIALS:
+        if material not in all_metrics:
+            continue
         sorted_models = sorted(
             [(k, v['R2']) for k, v in all_metrics[material].items()],
             key=lambda x: x[1], reverse=True)

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <style>
+        :root {
+            --bg-primary: #181b1f;
+            --bg-panel: #212427;
+            --border-color: #2c3033;
+            --text-primary: #d8d9da;
+            --text-secondary: #8e8e8e;
+            --accent-blue: #3274d9;
+        }
+        * { box-sizing: border-box; }
+        body {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         "Helvetica Neue", Arial, "Noto Sans SC", sans-serif,
+                         "Apple Color Emoji", "Segoe UI Emoji";
+        }
+        .dashboard-header {
+            padding: 20px 24px 8px;
+        }
+        .dashboard-header h1 {
+            margin: 0 0 4px;
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .dashboard-header p {
+            margin: 0;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat({{ layout.columns }}, 1fr);
+            grid-auto-rows: {{ layout.row_height }}px;
+            gap: {{ layout.gap }}px;
+            padding: {{ layout.padding }}px;
+        }
+        .panel {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .panel-title {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            flex-shrink: 0;
+        }
+        .panel-body {
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .panel-error {
+            color: #f5222d;
+            font-size: 12px;
+            padding: 8px;
+            border: 1px dashed #f5222d;
+            border-radius: 4px;
+        }
+        /* rank_table 样式 */
+        .rank-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        .rank-table th {
+            background: #2a2d30;
+            color: var(--text-secondary);
+            padding: 6px 8px;
+            text-align: left;
+            font-weight: 500;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .rank-table td {
+            padding: 5px 8px;
+            border-bottom: 1px solid #2a2d30;
+            color: var(--text-primary);
+        }
+        .rank-table tr.highlight td {
+            background: rgba(50, 116, 217, 0.1);
+        }
+        .rank-table tr:hover td {
+            background: rgba(255, 255, 255, 0.03);
+        }
+        /* markdown 样式 */
+        .markdown-content {
+            color: var(--text-primary);
+        }
+        .markdown-content strong {
+            color: #58a6ff;
+        }
+        .markdown-content ul {
+            color: var(--text-primary);
+        }
+        .markdown-content li {
+            margin: 2px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-header">
+        <h1>{{ title }}</h1>
+        <p>{{ subtitle }} &middot; 生成时间：{{ generated_at }}</p>
+    </div>
+    <div class="dashboard-grid">
+        {% for panel in panels %}
+        <div class="panel" style="grid-column: {{ panel.grid.col }} / span {{ panel.grid.col_span }}; grid-row: {{ panel.grid.row }} / span {{ panel.grid.row_span }};">
+            <div class="panel-title">{{ panel.title }}</div>
+            <div class="panel-body" id="panel-body-{{ panel.id }}">
+                {{ panel.html_content }}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- ECharts 内联 -->
+    <script>{{ echarts_source }}</script>
+
+    <!-- 各panel的初始化脚本 -->
+    <script>
+    (function() {
+        var charts = [];
+
+        {% for panel in panels %}
+        {% if panel.echarts_option %}
+        (function() {
+            try {
+                var el = document.getElementById('chart-{{ panel.id }}');
+                if (!el) return;
+                var chart = echarts.init(el, null, {renderer: 'canvas'});
+                chart.setOption({{ panel.echarts_option | tojson }});
+                charts.push(chart);
+            } catch (e) {
+                console.error('[Dashboard] Panel "{{ panel.id }}" 初始化失败:', e);
+                var body = document.getElementById('panel-body-{{ panel.id }}');
+                if (body) body.innerHTML = '<div class="panel-error">图表渲染失败: ' + e.message + '</div>';
+            }
+        })();
+        {% endif %}
+        {% endfor %}
+
+        /* 统一resize监听器（debounce） */
+        var resizeTimer;
+        window.addEventListener('resize', function() {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(function() {
+                for (var i = 0; i < charts.length; i++) {
+                    charts[i].resize();
+                }
+            }, 150);
+        });
+    })();
+    </script>
+</body>
+</html>
