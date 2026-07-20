@@ -115,7 +115,8 @@ USE_EVENT_FEATURES = True    # 实验1: 事件保持特征(SHOS) — EVT事件�
 USE_POOLED_TRAINING = False  # 实验2: 相似性聚类池化
 USE_LOG1P_TARGET = False     # 实验3: Y对数变换
 USE_QUANTILE_REGR = False    # 实验4: 分位数回归
-USE_PLAN_FEATURES = False    # 实验5: 采购计划特征(需更细粒度计划数据, 当前批次月≈常数, 信号弱)
+SKIP_REACTOR_PROTECT = True  # 开关: 跳过电抗器保护 (R²<0.05, 样本噪声主导, 无优化空间)
+USE_MAG_FEATURES = False     # 实验6: 量级特征(lag-1) — 泄漏版R²虚高+0.28, 无泄漏版Δ=-0.02, 备选关闭
 
 # ===================== 0. 每物资超参数配置 =====================
 # 两层字典: HP_DEFAULTS[model_key] = 默认参数; HP_OVERRIDES[model_key][material_substr] = 覆盖值
@@ -293,131 +294,64 @@ def load_or_generate_data():
     raise FileNotFoundError(f"无法生成数据文件: {DATA_FILE}")
 
 
-# ===================== 1.5 采购预安排数据加载 =====================
-_plan_cache = None
+# ===================== 1.6 量级特征 (lag-1, 备选) =====================
+_mag_cache = {}
 
+def build_magnitude_features(df, material):
+    """从bid_items表提取采购事件量级特征(lag-1, 无数据泄漏)。
 
-def load_procurement_plan():
-    """加载SGCC年度采购预安排JSON。缓存后复用。"""
-    global _plan_cache
-    if _plan_cache is not None:
-        return _plan_cache
-    plan_path = os.path.join(DATA_DIR, 'procurement_plan.json')
-    if os.path.exists(plan_path):
-        with open(plan_path, 'r', encoding='utf-8') as f:
-            _plan_cache = json.load(f)
-        logger.info(f"  [采购计划] 已加载: {plan_path}")
-        return _plan_cache
-    logger.warning(f"  [采购计划] 文件不存在: {plan_path}, 计划特征将退化为纯历史统计")
-    return {}
-
-
-def get_plan_for_month(plan_data, year, month):
-    """获取指定年月的采购计划信息。plan_data = procurement_plan.json的完整dict。"""
-    yr_key = str(year)
-    m_key = str(month)
-    yr_data = plan_data.get(yr_key, {})
-    return yr_data.get('monthly_schedule', {}).get(m_key, {})
-
-
-def _get_best_plan_year(plan_data, target_year):
-    """返回plan_data中最接近target_year的年份key（SGCC批次模式跨年稳定）。"""
-    years = sorted([int(k) for k in plan_data.keys() if k.isdigit()])
-    if target_year in years:
-        return str(target_year)
-    # 找最近的年份
-    best = min(years, key=lambda y: abs(y - target_year))
-    return str(best)
-
-
-def make_plan_features_train(demand_train, train_start_date, plan_data):
-    """训练集: 使用采购计划数据（与测试集同源），确保train/test分布一致。
-    不使用实际需求数据——避免训练时'未来事件=真实需求'的信息泄露。
+    特征(6维): n_packages, n_sub_bids, n_orgs, n_items, avg_item_qty, max_item_qty
+    关键设计: lag-1 — 当前月使用的是上个月的实际值, 避免同源泄漏。
+    工业逻辑: '上次采购规模大→这次可能是间歇期'(lag-1 rho为负)。
     """
-    n = len(demand_train)
-    cal_months = np.array([(train_start_date.month + i - 1) % 12 + 1 for i in range(n)])
-    cal_years = np.array([train_start_date.year + (train_start_date.month + i - 1) // 12 for i in range(n)])
+    if not USE_MAG_FEATURES:
+        return np.zeros((len(df), 0))
+    if material in _mag_cache:
+        return _mag_cache[material]
 
-    plan_evt_this = np.zeros(n)
-    plan_cnt_3m = np.zeros(n)
-    plan_cnt_6m = np.zeros(n)
-    plan_gap = np.zeros(n)
-    plan_is_batch = np.zeros(n)
+    import sqlite3
+    # Try both relative and absolute paths for portability
+    db_path = r'D:\Users\dell\PycharmProjects\bidding-ecp-data\data\ecp_data.db'
+    if not os.path.exists(db_path):
+        alt = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           '..', '..', 'bidding-ecp-data', 'data', 'ecp_data.db')
+        db_path = os.path.normpath(alt)
+    if not os.path.exists(db_path):
+        return np.zeros((len(df), 0))
 
-    for i in range(n):
-        m = cal_months[i]; y = cal_years[i]
-        # 使用对应年份的计划数据（可能fallback到最近年份）
-        yr_key = _get_best_plan_year(plan_data, y)
-        pinfo = get_plan_for_month(plan_data, yr_key, m)
-        has_b = pinfo.get('has_material_batch', False)
-        plan_evt_this[i] = float(has_b)
-        plan_is_batch[i] = float(has_b)
+    mat_short = material
+    if ',' in mat_short: mat_short = mat_short.split(',')[0]
+    pattern = f'%{mat_short}%'
+    conn = sqlite3.connect(db_path); c = conn.cursor()
+    c.execute('''SELECT demand_month, demand_quantity, package_no, sub_bid_name, project_org_name
+        FROM bid_items WHERE material_name LIKE ? AND demand_quantity > 0 AND demand_month >= ? AND demand_month <= ?''',
+        (pattern, '201911', '202607'))
+    rows = c.fetchall(); conn.close()
 
-        cnt3 = 0; cnt6 = 0; gap = 999
-        for j in range(6):
-            fut_i = i + j
-            if fut_i < n:
-                fut_m = cal_months[fut_i]; fut_y = cal_years[fut_i]
-            else:
-                fut_m = m + j
-                fut_y = y
-                while fut_m > 12: fut_m -= 12; fut_y += 1
-            yr_key_f = _get_best_plan_year(plan_data, fut_y)
-            p = get_plan_for_month(plan_data, yr_key_f, fut_m)
-            hb = float(p.get('has_material_batch', False))
-            cnt6 += hb
-            if j < 3: cnt3 += hb
-            if hb and gap == 999: gap = j
-        plan_cnt_3m[i] = cnt3
-        plan_cnt_6m[i] = cnt6
-        plan_gap[i] = min(gap, 12)
+    from collections import defaultdict
+    monthly = defaultdict(lambda: {'qty':0, 'pkgs':set(), 'subs':set(), 'orgs':set(), 'items':0, 'max_q':0})
+    for dm, q, pkg, sub, org in rows:
+        qf = float(q) if q else 0
+        monthly[dm]['qty'] += qf; monthly[dm]['pkgs'].add(pkg or '')
+        monthly[dm]['subs'].add(sub or ''); monthly[dm]['orgs'].add(org or '')
+        monthly[dm]['items'] += 1; monthly[dm]['max_q'] = max(monthly[dm]['max_q'], qf)
 
-    return plan_evt_this, plan_cnt_3m, plan_cnt_6m, plan_gap, plan_is_batch
-
-
-def make_plan_features_test(demand_train, train_start_date, test_months, plan_data):
-    """测试集: 与训练集使用相同的采购计划数据源。
-    训练/测试分布一致——都从plan_data计算，不涉及实际需求。
-    """
-    n_train = len(demand_train)
-    n_test = len(test_months)
-
-    plan_evt_this = np.zeros(n_test)
-    plan_cnt_3m = np.zeros(n_test)
-    plan_cnt_6m = np.zeros(n_test)
-    plan_gap = np.zeros(n_test)
-    plan_is_batch = np.zeros(n_test)
-
-    test_cal_years = np.array([train_start_date.year + (train_start_date.month + n_train + i - 1) // 12 for i in range(n_test)])
-    test_cal_months = np.array([(train_start_date.month + n_train + i - 1) % 12 + 1 for i in range(n_test)])
-
-    for i in range(n_test):
-        m = test_cal_months[i]; y = test_cal_years[i]
-        yr_key = _get_best_plan_year(plan_data, y)
-        pinfo = get_plan_for_month(plan_data, yr_key, m)
-        has_b = pinfo.get('has_material_batch', False)
-        plan_evt_this[i] = float(has_b)
-        plan_is_batch[i] = float(has_b)
-
-        cnt3 = 0; cnt6 = 0; gap = 999
-        for j in range(6):
-            idx = i + j
-            if idx < n_test:
-                fut_m = test_cal_months[idx]; fut_y = test_cal_years[idx]
-            else:
-                fut_m = m + j; fut_y = y
-                while fut_m > 12: fut_m -= 12; fut_y += 1
-            yr_key_f = _get_best_plan_year(plan_data, fut_y)
-            p = get_plan_for_month(plan_data, yr_key_f, fut_m)
-            hb = float(p.get('has_material_batch', False))
-            cnt6 += hb
-            if j < 3: cnt3 += hb
-            if hb and gap == 999: gap = j
-        plan_cnt_3m[i] = cnt3
-        plan_cnt_6m[i] = cnt6
-        plan_gap[i] = min(gap, 12)
-
-    return plan_evt_this, plan_cnt_3m, plan_cnt_6m, plan_gap, plan_is_batch
+    # Align with df dates (81 months from 2019-11)
+    n_df = len(df)
+    dates = df['date'].values
+    arr = np.zeros((n_df, 6))
+    for i in range(n_df):
+        d = pd.Timestamp(dates[i])
+        dm_key = f'{d.year}{d.month:02d}'
+        entry = monthly.get(dm_key, {'qty':0, 'pkgs':set(), 'subs':set(), 'orgs':set(), 'items':0, 'max_q':0})
+        arr[i,0] = len(entry['pkgs']); arr[i,1] = len(entry['subs'])
+        arr[i,2] = len(entry['orgs']); arr[i,3] = entry['items']
+        arr[i,4] = entry['qty'] / max(entry['items'], 1)
+        arr[i,5] = entry['max_q']
+    # LAG-1: row[t] uses row[t-1] value (only past info, no future leak)
+    arr_lagged = np.vstack([np.zeros((1, 6)), arr[:-1]])
+    _mag_cache[material] = arr_lagged
+    return arr_lagged
 
 
 # ===================== 2. Top-4 影响因子（基于Spearman动态计算） =====================
@@ -511,23 +445,6 @@ def preprocess_data(df, material):
         # 注: last_evt_mag/evt_trend/evt_cv 在测试集为常数(仅复制训练集最后值), 已移除
         evt_feats_tr = [gap_since_last, evt_cnt_6m, evt_cnt_12m, cumul_12m, month_freq]
 
-    # 实验5: 采购计划特征 (计划预安排→确定性批次月)
-    plan_feats_tr = []
-    plan_feats_te = []
-    if USE_PLAN_FEATURES:
-        plan_data = load_procurement_plan()
-        if plan_data:
-            train_start = df['date'].iloc[0]
-            test_months = np.array([(train_start.month + train_len + i - 1) % 12 + 1 for i in range(N_TEST)])
-            # 训练集计划特征
-            p_evt_this_tr, p_cnt3_tr, p_cnt6_tr, p_gap_tr, p_is_batch_tr = \
-                make_plan_features_train(demand_train, train_start, plan_data)
-            plan_feats_tr = [p_evt_this_tr, p_cnt3_tr, p_cnt6_tr, p_gap_tr, p_is_batch_tr]
-            # 测试集计划特征
-            p_evt_this_te, p_cnt3_te, p_cnt6_te, p_gap_te, p_is_batch_te = \
-                make_plan_features_test(demand_train, train_start, test_months, plan_data)
-            plan_feats_te = [p_evt_this_te, p_cnt3_te, p_cnt6_te, p_gap_te, p_is_batch_te]
-
     # 方案A: 季度末哑变量
     qtr_end_cols = []
     if USE_QUARTER_DUMMIES:
@@ -542,7 +459,12 @@ def preprocess_data(df, material):
         is_zero_lag1_tr, is_zero_lag12_tr,
         np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12),
         np.sin(2*np.pi*q_train/4), np.cos(2*np.pi*q_train/4),
-    ] + evt_feats_tr + qtr_end_cols + plan_feats_tr)
+    ] + evt_feats_tr + qtr_end_cols)
+
+    # 实验6: 量级特征(lag-1) → 追加到特征矩阵末尾
+    mag_all = build_magnitude_features(df, material)
+    if USE_MAG_FEATURES and mag_all.shape[1] > 0:
+        X_train_raw = np.column_stack([X_train_raw, mag_all[:train_len]])
 
     # Step 3: 特征Scaler仅对训练集fit
     feature_scaler = MinMaxScaler()
@@ -598,13 +520,15 @@ def preprocess_data(df, material):
         is_zero_lag1_te, is_zero_lag12_te,
         np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12),
         np.sin(2*np.pi*q_test/4), np.cos(2*np.pi*q_test/4),
-    ] + evt_feats_te + qtr_end_cols_te + plan_feats_te)
+    ] + evt_feats_te + qtr_end_cols_te)
+    if USE_MAG_FEATURES and mag_all.shape[1] > 0:
+        X_test_raw = np.column_stack([X_test_raw, mag_all[train_len:train_len+N_TEST]])
     X_test = feature_scaler.transform(X_test_raw)
     y_test = demand_test.copy()
 
     logger.info(f"  [特征工程] top4={top4}, n_feat={X_train.shape[1]}维, 训练={train_len}月"
                 + (" [事件特征ON]" if USE_EVENT_FEATURES else "")
-                + (" [计划特征ON]" if USE_PLAN_FEATURES else "")
+                + (" [量级特征ON]" if USE_MAG_FEATURES else "")
                 + (" [log1p]" if USE_LOG1P_TARGET else ""))
     return X_train, y_train, X_test, y_test, feature_scaler
 
@@ -1330,6 +1254,10 @@ def main():
             label = MATERIAL_LABELS[material]
             logger.info("")
             logger.info(f"[处理] {label} ({material})...")
+            # Skip materials in blacklist (e.g. 电抗器保护 R^2 always < 0.05)
+            if SKIP_REACTOR_PROTECT and '电抗器保护' in material:
+                logger.info("  [跳过] 电抗器保护已禁用 (R2<0.05, 噪声主导)")
+                continue
             df = data_dict[material]
             # 注意: 不要在 preprocess_data 之前调用 get_top_factors(material)
             # 缓存机制会在首次调用时填充 fallback 值

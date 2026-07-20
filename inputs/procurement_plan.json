@@ -1,0 +1,450 @@
+{
+  "2020": {
+    "monthly_schedule": {
+      "1": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      },
+      "2": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      },
+      "3": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      },
+      "4": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      },
+      "5": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "6": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      },
+      "7": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "8": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "9": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "10": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "11": {
+        "has_material_batch": true,
+        "project_count": 3.0,
+        "is_major_batch": true
+      },
+      "12": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      }
+    }
+  },
+  "2021": {
+    "monthly_schedule": {
+      "1": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "2": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "3": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "4": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "5": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "6": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "7": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "8": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "9": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "10": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      },
+      "11": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "12": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      }
+    }
+  },
+  "2022": {
+    "monthly_schedule": {
+      "1": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "2": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "3": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "4": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "5": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "6": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "7": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "8": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "9": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "10": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "11": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "12": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      }
+    }
+  },
+  "2023": {
+    "monthly_schedule": {
+      "1": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "2": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      },
+      "3": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "4": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "5": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      },
+      "6": {
+        "has_material_batch": true,
+        "project_count": 3.0,
+        "is_major_batch": true
+      },
+      "7": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "8": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "9": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "10": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "11": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "12": {
+        "has_material_batch": false,
+        "project_count": 0,
+        "is_major_batch": false
+      }
+    }
+  },
+  "2024": {
+    "monthly_schedule": {
+      "1": {
+        "has_material_batch": true,
+        "project_count": 3.0,
+        "is_major_batch": true
+      },
+      "2": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "3": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "4": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "5": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "6": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "7": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "8": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "9": {
+        "has_material_batch": true,
+        "project_count": 3.0,
+        "is_major_batch": true
+      },
+      "10": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "11": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "12": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      }
+    }
+  },
+  "2025": {
+    "monthly_schedule": {
+      "1": {
+        "has_material_batch": true,
+        "project_count": 3.0,
+        "is_major_batch": true
+      },
+      "2": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "3": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "4": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "5": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "6": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "7": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "8": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "9": {
+        "has_material_batch": true,
+        "project_count": 3.0,
+        "is_major_batch": true
+      },
+      "10": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "11": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "12": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      }
+    }
+  },
+  "2026": {
+    "monthly_schedule": {
+      "1": {
+        "has_material_batch": true,
+        "project_count": 3.0,
+        "is_major_batch": true
+      },
+      "2": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "3": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "4": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "5": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "6": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "7": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "8": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "9": {
+        "has_material_batch": true,
+        "project_count": 3.0,
+        "is_major_batch": true
+      },
+      "10": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      },
+      "11": {
+        "has_material_batch": true,
+        "project_count": 2.0,
+        "is_major_batch": false
+      },
+      "12": {
+        "has_material_batch": true,
+        "project_count": 1.0,
+        "is_major_batch": false
+      }
+    }
+  }
+}
