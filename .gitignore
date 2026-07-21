@@ -30,3 +30,4 @@ catboost_info/
 *.docx
 
 outputs/
+/.codegraph/.gitignore
