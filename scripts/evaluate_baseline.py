@@ -69,6 +69,7 @@ def run_baseline():
     # 2. 对每个物资跑全部已启用模型
     # 模型注册表: (名称, 调用函数, 是否需要df参数)
     all_results = {}  # {material: {model_name: {r2, mape, rmse, mae}}}
+    all_preds = {}    # {material: {model_name: (y_pred, y_test)}}
 
     for material in materials:
         # 跳过被禁用的物资
@@ -81,74 +82,74 @@ def run_baseline():
         X_train, y_train, X_test, y_test, scaler = m.preprocess_data(df, material)
 
         material_results = {}
+        material_preds = {}
+
+        def _run_and_store(name, result_tuple, has_4_outputs=True):
+            """运行模型并存储预测值和指标"""
+            if has_4_outputs:
+                yp, yt, _, _ = result_tuple
+            else:
+                yp, yt = result_tuple
+            material_results[name] = evaluate_full(yt, yp)
+            material_preds[name] = (np.array(yp), np.array(yt))
 
         # --- CatBoost 直接回归 ---
         try:
-            yp, yt, _, _ = m.run_catboost(X_train, y_train, X_test, y_test, material)
-            material_results['CatBoost'] = evaluate_full(yt, yp)
+            _run_and_store('CatBoost', m.run_catboost(X_train, y_train, X_test, y_test, material))
         except Exception as e:
             print(f"    [ERROR] CatBoost: {e}")
 
         # --- CatBoost-Tweedie ---
         try:
-            yp, yt, _, _ = m.run_catboost_tweedie(X_train, y_train, X_test, y_test, material)
-            material_results['CatBoost-Tweedie'] = evaluate_full(yt, yp)
+            _run_and_store('CatBoost-Tweedie', m.run_catboost_tweedie(X_train, y_train, X_test, y_test, material))
         except Exception as e:
             print(f"    [ERROR] CatBoost-Tweedie: {e}")
 
         # --- CatBoost-2S ---
         try:
-            yp, yt, _, _ = m.run_catboost_2s(X_train, y_train, X_test, y_test, material)
-            material_results['CatBoost-2S'] = evaluate_full(yt, yp)
+            _run_and_store('CatBoost-2S', m.run_catboost_2s(X_train, y_train, X_test, y_test, material))
         except Exception as e:
             print(f"    [ERROR] CatBoost-2S: {e}")
 
         # --- CondCatBoost ---
         try:
-            yp, yt, _, _ = m.run_conditional_catboost(X_train, y_train, X_test, y_test, material)
-            material_results['CondCatBoost'] = evaluate_full(yt, yp)
+            _run_and_store('CondCatBoost', m.run_conditional_catboost(X_train, y_train, X_test, y_test, material))
         except Exception as e:
             print(f"    [ERROR] CondCatBoost: {e}")
 
         # --- TwoStage ---
         try:
-            yp, yt, _, _ = m.run_two_stage(df, X_train, y_train, X_test, y_test, material)
-            material_results['TwoStage'] = evaluate_full(yt, yp)
+            _run_and_store('TwoStage', m.run_two_stage(df, X_train, y_train, X_test, y_test, material))
         except Exception as e:
             print(f"    [ERROR] TwoStage: {e}")
 
         # --- Ridge-2S ---
         try:
-            yp, yt, _, _ = m.run_ridge_2s(X_train, y_train, X_test, y_test, material)
-            material_results['Ridge-2S'] = evaluate_full(yt, yp)
+            _run_and_store('Ridge-2S', m.run_ridge_2s(X_train, y_train, X_test, y_test, material))
         except Exception as e:
             print(f"    [ERROR] Ridge-2S: {e}")
 
         # --- ElasticNet-2S ---
         try:
-            yp, yt, _, _ = m.run_elasticnet_2s(X_train, y_train, X_test, y_test, material)
-            material_results['ElasticNet-2S'] = evaluate_full(yt, yp)
+            _run_and_store('ElasticNet-2S', m.run_elasticnet_2s(X_train, y_train, X_test, y_test, material))
         except Exception as e:
             print(f"    [ERROR] ElasticNet-2S: {e}")
 
         # --- 基线: NaiveSeasonal ---
         try:
-            yp, yt = m.baseline_naive_seasonal(y_train, y_test)
-            material_results['NaiveSeasonal'] = evaluate_full(yt, yp)
+            _run_and_store('NaiveSeasonal', m.baseline_naive_seasonal(y_train, y_test), has_4_outputs=False)
         except Exception as e:
             print(f"    [ERROR] NaiveSeasonal: {e}")
 
         # --- 基线: SARIMA ---
         try:
-            yp, yt = m.baseline_sarima(y_train, y_test)
-            material_results['SARIMA'] = evaluate_full(yt, yp)
+            _run_and_store('SARIMA', m.baseline_sarima(y_train, y_test), has_4_outputs=False)
         except Exception as e:
             print(f"    [ERROR] SARIMA: {e}")
 
         # --- 基线: Croston-SBA ---
         try:
-            yp, yt = m.run_croston_sba(y_train, y_test)
-            material_results['Croston-SBA'] = evaluate_full(yt, yp)
+            _run_and_store('Croston-SBA', m.run_croston_sba(y_train, y_test), has_4_outputs=False)
         except Exception as e:
             print(f"    [ERROR] Croston-SBA: {e}")
 
@@ -156,17 +157,40 @@ def run_baseline():
         try:
             yp, yt = m.run_lightgbm(X_train, y_train, X_test, y_test, material)
             if yp is not None:
-                material_results['LightGBM'] = evaluate_full(yt, yp)
+                _run_and_store('LightGBM', (yp, yt), has_4_outputs=False)
         except Exception as e:
             pass  # 未安装则静默跳过
 
         all_results[material] = material_results
+        all_preds[material] = material_preds
 
         # 打印当前物资最优
         if material_results:
             best_model = max(material_results, key=lambda k: material_results[k]['r2'])
             best_r2 = material_results[best_model]['r2']
             print(f"    最优: {best_model} R²={best_r2:.4f}")
+
+    # M-01: Top-3模型加权融合 (R²权重, 排除朴素基线)
+    _BASELINE_MODELS = {'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA', 'Chronos', 'Croston-SBA'}
+    if getattr(m, 'USE_BLEND_ENSEMBLE', False):
+        for material in list(all_results.keys()):
+            results = all_results[material]
+            preds = all_preds.get(material, {})
+            candidates = [(k, v['r2']) for k, v in results.items()
+                          if k not in _BASELINE_MODELS and v['r2'] > 0 and k in preds]
+            if len(candidates) < 2:
+                continue
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            top3 = candidates[:3]
+            weights = np.array([max(r2, 0.01) for _, r2 in top3])
+            weights = weights / weights.sum()
+            y_preds = [preds[name][0] for name, _ in top3]
+            y_test_ref = preds[top3[0][0]][1]
+            y_blend = sum(w * yp for w, yp in zip(weights, y_preds))
+            y_blend = np.maximum(y_blend, 0)
+            blend_metrics = evaluate_full(y_test_ref, y_blend)
+            all_results[material]['Blend-Top3'] = blend_metrics
+            print(f"    [Blend] R²={blend_metrics['r2']:.4f}")
 
     # 3. 汇总统计
     print()

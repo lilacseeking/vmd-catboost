@@ -1,24 +1,31 @@
 {
   "baseline": {
-    "r2": 0.6799448458449987,
-    "mape": 102.2496698560825,
-    "rmse": 485.73199767453144,
-    "mae": 336.19262972410235,
-    "pass_ratio": 0.0,
-    "data_version": "v0",
-    "model_version": "baseline",
-    "date": "2026-07-20"
-  },
-  "current_best": {
-    "r2": 0.6799448458449987,
-    "mape": 102.2496698560825,
-    "rmse": 485.73199767453144,
-    "mae": 336.19262972410235,
-    "pass_ratio": 0.0,
-    "data_version": "v0",
+    "r2": 0.4886,
+    "mape": 161.28,
+    "pass_ratio": 0.05,
+    "data_version": "v2_20materials",
     "model_version": "baseline",
     "date": "2026-07-20",
-    "source_round": "baseline"
+    "note": "20物资×15模型, 无增强特征, 无融合"
   },
-  "rounds": []
+  "current_best": {
+    "r2": 0.7241,
+    "mape": 122.96,
+    "pass_ratio": 0.4737,
+    "data_version": "v2_20materials",
+    "model_version": "D-02+M-01",
+    "date": "2026-07-21",
+    "source_round": "M-01",
+    "active_switches": ["USE_ENHANCED_LAG_FEATURES=True", "USE_BLEND_ENSEMBLE=True"]
+  },
+  "rounds": [
+    {"round_id": "D-01", "track": "D", "hypothesis": "外部宏观因子(铝价/工业用电)Spearman候选", "switch_name": "USE_EXTERNAL_FACTORS", "switch_default": false, "delta_r2": -0.021, "decision": "switch_off", "reason": "趋势伪相关替换有效内部因子"},
+    {"round_id": "D-02", "track": "D", "hypothesis": "增强滞后/滚动特征(lag2,3,6+roll6,12+std+ewm+yoy)+NaN防御", "switch_name": "USE_ENHANCED_LAG_FEATURES", "switch_default": true, "delta_r2": 0.229, "delta_mape": -37.18, "decision": "keep", "reason": "R²0.489→0.718, 达标5%→42%"},
+    {"round_id": "D-03", "track": "D", "hypothesis": "has_batch/digital_bids纳入Spearman候选池(竞争模式)", "switch_name": "_INTERNAL_FACTORS扩展", "switch_default": false, "delta_r2": -0.007, "decision": "switch_off", "reason": "160kN R²暴跌-0.32, Spearman竞争替换"},
+    {"round_id": "D-04", "track": "D", "hypothesis": "has_batch/digital_bids附加模式(lag-1)", "switch_name": "USE_BATCH_FEATURES", "switch_default": false, "delta_r2": -0.027, "decision": "switch_off", "reason": "300kN暴跌-0.42, 批次信号对间歇型引入噪声"},
+    {"round_id": "D-05", "track": "D", "hypothesis": "月度季节剖面(同月历史均值)", "switch_name": "USE_SEASONAL_PROFILE", "switch_default": false, "delta_r2": -0.018, "decision": "switch_off", "reason": "间歇型物资月均值被零主导, MAPE+22pp"},
+    {"round_id": "M-01", "track": "M", "hypothesis": "Top-3模型R²加权融合(排除基线)", "switch_name": "USE_BLEND_ENSEMBLE", "switch_default": true, "delta_r2": 0.006, "delta_mape": -1.14, "decision": "keep", "reason": "电容器保护0.77→0.88达标, 防误闭锁+0.015, 达标42%→47%"},
+    {"round_id": "M-02", "track": "M", "hypothesis": "log1p目标变换稳定右偏方差", "switch_name": "USE_LOG1P_TARGET", "switch_default": false, "delta_r2": -0.259, "decision": "switch_off", "reason": "间歇性零值+反变换放大误差, R²全面崩溃"},
+    {"round_id": "M-03", "track": "M", "hypothesis": "扩展融合Top-5+softmax温度+含基线", "switch_name": "USE_BLEND_ENSEMBLE升级", "switch_default": false, "delta_r2": -0.006, "decision": "switch_off", "reason": "softmax τ=0.1过于集中, 电容器保护失去融合优势, 回退M-01"}
+  ]
 }

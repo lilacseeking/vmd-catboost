@@ -1,0 +1,652 @@
+{
+  "version": "2.1",
+  "source_doc": "docs/技术方案_配电网物资预测看板_v2.md",
+  "parse_date": "2026-07-20",
+  "doc_meta": {
+    "doc_version": "v2.1",
+    "doc_date": "2026-05-29",
+    "doc_status": "评审修订版 + 物资动态适配补充",
+    "project": "电力配电网物资需求预测",
+    "output_format": "单HTML文件（内联CSS/JS/数据），可直接浏览器打开",
+    "design_principles": [
+      "非侵入性：main.py仅5个插入点约15行代码",
+      "声明式优先：布局/窗口类型/数据绑定全部JSON配置驱动",
+      "类型安全：窗口类型装饰器自注册，配置与渲染器一一映射",
+      "数据直传：numpy数组直接序列化JSON list，无中间CSV落盘",
+      "离线自治：零外部依赖，ECharts 5.x内联，系统字体栈",
+      "可扩展：新增窗口类型只需一个装饰器函数+配置声明",
+      "防御性编程：dashboard异常不中断主预测流程，panel级独立降级",
+      "物资动态适配：禁止硬编码物资名或数量，自动感知当前物资集合"
+    ]
+  },
+  "tech_stack": {
+    "language": "Python 3.14",
+    "platform": "Windows/Linux",
+    "visualization": "ECharts 5.x（内联，~1MB完整包或~400KB定制构建）",
+    "templating": "Jinja2 >= 3.1.0",
+    "config_validation": "jsonschema >= 4.20.0",
+    "data_processing": "numpy（现有序列化依赖）",
+    "layout_engine": "CSS Grid 12列系统 + inline style定位",
+    "font": "系统字体栈（-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, Noto Sans SC, sans-serif）",
+    "output": "单HTML文件，零外部网络依赖",
+    "existing_deps_unchanged": ["numpy", "matplotlib", "scikit-learn"],
+    "new_deps": ["jinja2>=3.1.0", "jsonschema>=4.20.0"],
+    "modules": {
+      "collector": "dashboard/collector.py — 收集+序列化+聚合",
+      "serializer": "dashboard/serializer.py — NumpyEncoder + to_json_safe",
+      "config_loader": "dashboard/config_loader.py — 配置加载+Schema校验",
+      "registry": "dashboard/registry.py — @register_panel装饰器注册",
+      "data_binding": "dashboard/data_binding.py — JSONPath-like表达式解析",
+      "summary": "dashboard/summary.py — AI总结规则引擎",
+      "builder": "dashboard/builder.py — 主构建器流程编排",
+      "panels": "dashboard/panels/ — 各窗口类型渲染器",
+      "templates": "dashboard/templates/base.html — Jinja2主模板",
+      "static": "dashboard/static/echarts.min.js — ECharts源码",
+      "schemas": "dashboard/schemas/ — JSON Schema定义"
+    }
+  },
+  "layout": {
+    "type": "css_grid",
+    "columns": 12,
+    "row_height": 80,
+    "gap": 12,
+    "padding": 16,
+    "unit": "px",
+    "positioning": "inline_style",
+    "css_class": ".dashboard-grid",
+    "grid_template": "repeat(12, 1fr)",
+    "grid_auto_rows": "80px",
+    "theme": "dark",
+    "theme_variables": {
+      "--bg-primary": "#181b1f",
+      "--bg-panel": "#212427",
+      "--border-color": "#2c3033",
+      "--text-primary": "#d8d9da",
+      "--text-secondary": "#8e8e8e",
+      "--accent-blue": "#3274d9"
+    },
+    "panel_style": {
+      "background": "var(--bg-panel)",
+      "border": "1px solid var(--border-color)",
+      "border_radius": "4px",
+      "padding": "12px",
+      "overflow": "hidden"
+    },
+    "auto_layout_algorithm": {
+      "description": "repeat展开panel的自动布局",
+      "steps": [
+        "扫描所有固定panel计算max_fixed_row = max(row + row_span - 1)",
+        "auto区域起始行 = max_fixed_row + 1",
+        "items_per_row = columns // col_span",
+        "第i个实例: row = auto起始行 + (i // items_per_row) * row_span, col = 1 + (i % items_per_row) * col_span",
+        "后续固定panel行号 += repeat区域总占用行数"
+      ]
+    }
+  },
+  "data_schema": {
+    "description": "dashboard_data.json完整Schema — ResultCollector.to_dashboard_data()生成",
+    "root_keys": ["version", "generated_at", "meta", "results", "aggregations"],
+    "meta": {
+      "project": "string — 项目名称",
+      "materials": "list[str] — 当前物资列表（动态，禁止硬编码）",
+      "models": "list[str] — 当前模型列表（运行时确定）",
+      "metrics": ["MSE", "RMSE", "MAE", "R2", "sMAPE", "MASE", "WRMSSE", "zero_acc", "sCRPS"],
+      "forecast_horizon": "int — 预测期数（默认12）",
+      "time_labels": "list[str] — 时间轴标签（如['1月'...'12月']）"
+    },
+    "results_structure": {
+      "description": "results[material][model] = {y_pred, metrics}; results[material].__y_test__ = 实际值数组",
+      "y_test_storage": "每物资独立存储一次__y_test__，所有模型共享",
+      "y_pred": "list[float] — 长度=forecast_horizon",
+      "metrics": "dict[str, float] — 9个指标"
+    },
+    "aggregations": {
+      "best_model_per_material": "dict[material, {model, metric, value}]",
+      "material_avg_metrics": "dict[material, dict[metric, float]]",
+      "model_avg_metrics": "dict[model, dict[metric, float]]",
+      "overall_best": "{material, model, R2}",
+      "overall_worst": "{material, model, R2}"
+    },
+    "context_layer": {
+      "description": "__context__是渲染时注入的上下文层，不属于业务数据",
+      "keys": ["summary", "generated_at"],
+      "access": "$.__context__.summary"
+    },
+    "numpy_serialization": {
+      "precision": "round(4)",
+      "nan_handling": "NaN → null，前端ECharts自动跳过null点（断线显示）",
+      "encoding": "JSON list（非base64），数据量小（5×15×12=900数值）"
+    }
+  },
+  "views": [
+    {
+      "id": "overview",
+      "name": "总览视图",
+      "description": "一屏总览所有物资、所有模型的预测效果，单页看板",
+      "cards": [
+        {
+          "id": "gauge_r2",
+          "type": "gauge",
+          "title": "整体 R² 均值",
+          "grid": {"col": 1, "row": 1, "col_span": 2, "row_span": 2},
+          "fields": [
+            {
+              "name": "value",
+              "unit": "score (0~1)",
+              "source": "$.aggregations.model_avg_metrics.*.R2 | mean | round(3)",
+              "formula": "所有模型R2均值，保留3位小数",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "label",
+              "unit": "text",
+              "source": "R² Score",
+              "formula": "固定文本标签",
+              "binding_type": "control_param"
+            }
+          ],
+          "data_binding": {
+            "value": "$.aggregations.model_avg_metrics.*.R2 | mean | round(3)",
+            "label": "R² Score"
+          },
+          "options": {
+            "min": 0,
+            "max": 1,
+            "thresholds": [
+              {"value": 0.6, "color": "#f5222d", "meaning": "差"},
+              {"value": 0.8, "color": "#faad14", "meaning": "中"},
+              {"value": 0.9, "color": "#52c41a", "meaning": "优"}
+            ]
+          },
+          "refresh": "event_driven",
+          "interaction": ["hover_tooltip"],
+          "renderer": "dashboard/panels/gauge.py"
+        },
+        {
+          "id": "gauge_mape",
+          "type": "gauge",
+          "title": "整体 sMAPE 均值",
+          "grid": {"col": 3, "row": 1, "col_span": 2, "row_span": 2},
+          "fields": [
+            {
+              "name": "value",
+              "unit": "% (0~100)",
+              "source": "$.aggregations.model_avg_metrics.*.sMAPE | mean | round(2)",
+              "formula": "所有模型sMAPE均值，保留2位小数，越低越好",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "label",
+              "unit": "text",
+              "source": "sMAPE %",
+              "formula": "固定文本标签",
+              "binding_type": "control_param"
+            }
+          ],
+          "data_binding": {
+            "value": "$.aggregations.model_avg_metrics.*.sMAPE | mean | round(2)",
+            "label": "sMAPE %"
+          },
+          "options": {
+            "min": 0,
+            "max": 100,
+            "inverse": true,
+            "thresholds": [
+              {"value": 10, "color": "#52c41a", "meaning": "优（低误差）"},
+              {"value": 25, "color": "#faad14", "meaning": "中"},
+              {"value": 50, "color": "#f5222d", "meaning": "差（高误差）"}
+            ]
+          },
+          "refresh": "event_driven",
+          "interaction": ["hover_tooltip"],
+          "renderer": "dashboard/panels/gauge.py"
+        },
+        {
+          "id": "summary_panel",
+          "type": "markdown_panel",
+          "title": "AI 分析总结",
+          "grid": {"col": 5, "row": 1, "col_span": 8, "row_span": 2},
+          "fields": [
+            {
+              "name": "content",
+              "unit": "markdown_text",
+              "source": "$.__context__.summary",
+              "formula": "SummaryEngine规则引擎生成的Markdown文本",
+              "binding_type": "path_expression"
+            }
+          ],
+          "data_binding": {
+            "content": "$.__context__.summary"
+          },
+          "options": {
+            "font_size": 14,
+            "max_height": 160
+          },
+          "refresh": "event_driven",
+          "interaction": ["scroll"],
+          "renderer": "dashboard/panels/markdown_panel.py",
+          "summary_rules": [
+            {"id": "best_model", "priority": 10, "trigger": "始终触发"},
+            {"id": "worst_material", "priority": 20, "trigger": "始终触发"},
+            {"id": "anomaly_detect", "priority": 30, "trigger": "存在R²<0.5的物资×模型组合"},
+            {"id": "zero_demand", "priority": 40, "trigger": "zero_acc < 0.8"},
+            {"id": "model_consensus", "priority": 50, "trigger": "Top3模型Pearson相关系数>0.95"},
+            {"id": "overall_quality", "priority": 60, "trigger": "始终触发"}
+          ]
+        },
+        {
+          "id": "heatmap_r2",
+          "type": "heatmap",
+          "title": "物资 × 模型 R² 热力图",
+          "grid": {"col": 1, "row": 3, "col_span": 12, "row_span": 3},
+          "fields": [
+            {
+              "name": "x_axis",
+              "unit": "category_list",
+              "source": "$.meta.models",
+              "formula": "所有模型名称列表",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "y_axis",
+              "unit": "category_list",
+              "source": "$.meta.materials",
+              "formula": "所有物资名称列表（动态）",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "metric",
+              "unit": "metric_name",
+              "source": "R2",
+              "formula": "控制参数：从results[material][model].metrics[metric]提取值构建热力矩阵",
+              "binding_type": "control_param"
+            }
+          ],
+          "data_binding": {
+            "x_axis": "$.meta.models",
+            "y_axis": "$.meta.materials",
+            "metric": "R2"
+          },
+          "options": {
+            "color_range": ["#f5222d", "#faad14", "#52c41a"],
+            "min": 0,
+            "max": 1,
+            "show_value": true,
+            "axisLabel_rotate": 30
+          },
+          "refresh": "event_driven",
+          "interaction": ["hover_tooltip", "visualMap_calculable"],
+          "renderer": "dashboard/panels/heatmap.py",
+          "render_logic": "遍历results[material][model].metrics[metric]构建[x_idx, y_idx, value]数组，跳过__y_test__等非模型key"
+        },
+        {
+          "id": "line_material_${material_id}",
+          "type": "line_chart",
+          "title": "${material} - 多模型预测对比",
+          "repeat": {
+            "foreach": "$.meta.materials",
+            "as": "material",
+            "id_suffix": "material_id",
+            "expansion_rule": "按物资数量动态展开（5物资→5个实例，8物资→8个实例）",
+            "id_pattern": "line_material_0, line_material_1, ..., line_material_N"
+          },
+          "grid": {"col": 1, "row": "auto", "col_span": 6, "row_span": 3},
+          "fields": [
+            {
+              "name": "series",
+              "unit": "list[float] × N_models",
+              "source": "$.results.${material}.*.y_pred",
+              "formula": "该物资所有模型的预测数组（通配*遍历所有模型key）",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "y_test",
+              "unit": "list[float]",
+              "source": "$.results.${material}.__y_test__",
+              "formula": "该物资的实际值数组（每物资存储一次）",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "x_axis",
+              "unit": "category_list",
+              "source": "$.meta.time_labels",
+              "formula": "时间轴标签（如['1月'...'12月']）",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "top_n",
+              "unit": "count",
+              "source": "5",
+              "formula": "按rank_by指标排序后仅展示前5个模型曲线",
+              "binding_type": "control_param"
+            },
+            {
+              "name": "rank_by",
+              "unit": "metric_name",
+              "source": "R2",
+              "formula": "排序依据指标，用于从所有模型中选取Top N",
+              "binding_type": "control_param"
+            }
+          ],
+          "data_binding": {
+            "series": "$.results.${material}.*.y_pred",
+            "y_test": "$.results.${material}.__y_test__",
+            "x_axis": "$.meta.time_labels",
+            "top_n": 5,
+            "rank_by": "R2"
+          },
+          "options": {
+            "show_legend": true,
+            "smooth": true,
+            "y_test_style": "dashed_scatter",
+            "y_test_render": "lineStyle.type=dashed, symbol=circle, symbolSize=6"
+          },
+          "refresh": "event_driven",
+          "interaction": ["hover_tooltip_axis", "legend_toggle", "resize_responsive"],
+          "renderer": "dashboard/panels/line_chart.py",
+          "render_logic": "按rank_by排序取top_n模型 + y_test虚线散点叠加"
+        },
+        {
+          "id": "rank_table_r2",
+          "type": "rank_table",
+          "title": "模型综合排名（按R²）",
+          "grid": {"col": 1, "row": 21, "col_span": 4, "row_span": 3},
+          "fields": [
+            {
+              "name": "metric",
+              "unit": "metric_name",
+              "source": "R2",
+              "formula": "排名依据指标",
+              "binding_type": "control_param"
+            },
+            {
+              "name": "sort",
+              "unit": "direction",
+              "source": "desc",
+              "formula": "降序排列（R²越高越好）",
+              "binding_type": "control_param"
+            },
+            {
+              "name": "top_n",
+              "unit": "count",
+              "source": "10",
+              "formula": "展示前10个模型",
+              "binding_type": "control_param"
+            },
+            {
+              "name": "group_by",
+              "unit": "dimension",
+              "source": "model",
+              "formula": "按模型维度聚合（对每个模型取所有物资的指标均值）",
+              "binding_type": "control_param"
+            }
+          ],
+          "data_binding": {
+            "metric": "R2",
+            "sort": "desc",
+            "top_n": 10,
+            "group_by": "model"
+          },
+          "options": {
+            "columns": ["排名", "模型", "R²均值", "最佳物资", "最差物资"],
+            "highlight_top": 3
+          },
+          "refresh": "event_driven",
+          "interaction": ["row_highlight"],
+          "renderer": "dashboard/panels/rank_table.py",
+          "render_logic": "纯HTML table（非ECharts），CSS类控制暗色主题样式，前3名高亮",
+          "dynamic_adaptation": "遍历data['meta']['models']和data['meta']['materials']动态计算，物资数量变化仅影响聚合分母"
+        },
+        {
+          "id": "bar_material_r2",
+          "type": "bar_chart",
+          "title": "各物资最佳模型 R² 对比",
+          "grid": {"col": 5, "row": 21, "col_span": 4, "row_span": 3},
+          "fields": [
+            {
+              "name": "categories",
+              "unit": "category_list",
+              "source": "$.meta.materials",
+              "formula": "所有物资名称（动态，物资增减自动适配）",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "values",
+              "unit": "score (0~1)",
+              "source": "$.aggregations.best_model_per_material.*.value",
+              "formula": "每个物资最佳模型的R²值",
+              "binding_type": "path_expression"
+            }
+          ],
+          "data_binding": {
+            "categories": "$.meta.materials",
+            "values": "$.aggregations.best_model_per_material.*.value"
+          },
+          "options": {
+            "horizontal": false,
+            "show_value": true,
+            "color": "#1890ff"
+          },
+          "refresh": "event_driven",
+          "interaction": ["hover_tooltip"],
+          "renderer": "dashboard/panels/bar_chart.py"
+        },
+        {
+          "id": "bar_model_mae",
+          "type": "bar_chart",
+          "title": "各模型 MAE 均值对比",
+          "grid": {"col": 9, "row": 21, "col_span": 4, "row_span": 3},
+          "fields": [
+            {
+              "name": "categories",
+              "unit": "category_list",
+              "source": "$.meta.models",
+              "formula": "所有模型名称列表",
+              "binding_type": "path_expression"
+            },
+            {
+              "name": "values",
+              "unit": "MAE值",
+              "source": "$.aggregations.model_avg_metrics.*.MAE",
+              "formula": "每个模型跨所有物资的MAE均值",
+              "binding_type": "path_expression"
+            }
+          ],
+          "data_binding": {
+            "categories": "$.meta.models",
+            "values": "$.aggregations.model_avg_metrics.*.MAE"
+          },
+          "options": {
+            "horizontal": true,
+            "show_value": true,
+            "color": "#722ed1",
+            "sort": "asc"
+          },
+          "refresh": "event_driven",
+          "interaction": ["hover_tooltip"],
+          "renderer": "dashboard/panels/bar_chart.py"
+        }
+      ]
+    }
+  ],
+  "data_bindings": {
+    "syntax": "类JSONPath语法 + 管道操作",
+    "root": "$（dashboard_data + __context__）",
+    "operators": {
+      ".": "属性访问",
+      "*": "通配符（遍历当前层所有key，跳过__前缀key）",
+      "|": "管道函数分隔符"
+    },
+    "pipes": {
+      "mean": "取均值（空值保护：空集合返回0.0）",
+      "sort_desc": "降序排列",
+      "top(n)": "取前N个",
+      "round(n)": "保留n位小数",
+      "minmax": "返回[min, max]元组"
+    },
+    "field_classification": {
+      "path_expression": "以$.开头，由DataBindingResolver解析为实际数据",
+      "control_param": "非$.开头的固定值，直接透传给渲染器作为配置参数"
+    },
+    "resolver": "dashboard/data_binding.py — DataBindingResolver",
+    "resolver_init": "DataBindingResolver(data, context)，$根节点包含data和__context__两个顶层key",
+    "wildcard_rule": "遇到*时对每个子value递归应用剩余segments，跳过__前缀key（如__y_test__）",
+    "examples": [
+      "$.results.交流避雷器.*.y_pred → 该物资所有模型的预测数组",
+      "$.aggregations.model_avg_metrics.*.R2 → 所有模型的R2值字典",
+      "$.results.*.*.metrics.R2 → 所有物资所有模型的R2",
+      "$.results.交流避雷器.__y_test__ → 该物资的实际值数组",
+      "$.__context__.summary → AI总结文本"
+    ]
+  },
+  "dynamic_rules": {
+    "repeat_foreach": {
+      "description": "声明式panel展开机制，避免为每种物资手动编写重复配置",
+      "config_fields": {
+        "foreach": "路径表达式，解析为数组（如$.meta.materials → 5种物资名称）",
+        "as": "迭代变量名，用于模板替换",
+        "id_suffix": "用于生成唯一panel ID的索引变量名"
+      },
+      "substitution": "${material}占位符在展开时替换为实际值（id, title, data_binding中的表达式）",
+      "grid_auto": "grid.row='auto'时由Builder按顺序自动分配行号",
+      "independence": "展开后每个实例独立渲染，互不影响",
+      "expansion_example": "5物资 → line_material_0 ~ line_material_4（5个独立panel）"
+    },
+    "material_dynamic_adaptation": {
+      "core_principle": "配置中禁止硬编码物资名称，所有物资相关绑定必须通过动态路径",
+      "dynamic_paths": [
+        "$.meta.materials — 当前运行的所有物资列表",
+        "repeat.foreach: '$.meta.materials' — 按物资展开panel",
+        "$.results.* — 通配所有物资",
+        "$.aggregations.best_model_per_material.* — 通配所有物资的最佳模型"
+      ],
+      "adaptation_table": {
+        "line_chart_repeat": "自动新增/减少对应panel，不需要改配置",
+        "heatmap": "自动扩展/收缩y轴，不需要改配置",
+        "gauge": "自动重新计算均值，不需要改配置",
+        "bar_chart_materials": "自动新增/减少柱子，不需要改配置",
+        "rank_table": "自动包含/排除物资数据，不需要改配置",
+        "markdown_panel": "规则引擎自动感知，不需要改配置"
+      },
+      "deletion_chain": [
+        "main.py不为已删除物资执行预测",
+        "collector.collect()从未被调用，_data中无此物资",
+        "meta.materials自动排除",
+        "repeat展开减少对应实例",
+        "heatmap y轴自动收缩",
+        "规则引擎仅处理存在的物资",
+        "Grid布局auto区域自动调整"
+      ]
+    },
+    "model_dynamic_adaptation": {
+      "description": "模型增减与物资同理",
+      "dynamic_path": "$.meta.models动态反映实际运行的模型列表",
+      "affected_panels": ["heatmap x轴", "rank_table行数", "line_chart legend"],
+      "top_n_protection": "模型数量>15时，line_chart的top_n:5避免曲线过于拥挤"
+    },
+    "summary_engine_dynamic": {
+      "requirement": "所有规则必须从data['meta']['materials']动态获取物资列表，禁止硬编码",
+      "rules_adaptation": {
+        "best_model": "遍历$.meta.materials计算win_count",
+        "worst_material": "遍历所有物资取R2最低者",
+        "anomaly_detect": "遍历$.results.*.*检测R2<0.5",
+        "zero_demand": "遍历所有物资检查zero_acc",
+        "model_consensus": "对每个物资独立计算Top3 Pearson相关，仅输出有共识的物资",
+        "overall_quality": "从aggregations动态计算"
+      }
+    }
+  },
+  "panel_types": {
+    "line_chart": {
+      "description": "多模型预测曲线对比",
+      "required_bindings": ["series", "x_axis"],
+      "optional_bindings": ["y_test", "top_n", "rank_by"],
+      "renderer_file": "dashboard/panels/line_chart.py",
+      "echarts_type": "line"
+    },
+    "rank_table": {
+      "description": "指标排名表格",
+      "required_bindings": ["metric", "sort", "top_n"],
+      "optional_bindings": ["group_by"],
+      "renderer_file": "dashboard/panels/rank_table.py",
+      "echarts_type": null,
+      "output": "纯HTML table"
+    },
+    "bar_chart": {
+      "description": "指标对比柱状图",
+      "required_bindings": ["categories", "values"],
+      "optional_bindings": ["horizontal", "sort", "show_value", "color"],
+      "renderer_file": "dashboard/panels/bar_chart.py",
+      "echarts_type": "bar"
+    },
+    "markdown_panel": {
+      "description": "AI总结/富文本",
+      "required_bindings": ["content"],
+      "renderer_file": "dashboard/panels/markdown_panel.py",
+      "echarts_type": null,
+      "output": "Markdown→HTML转换（内置轻量解析）"
+    },
+    "gauge": {
+      "description": "仪表盘",
+      "required_bindings": ["value", "label"],
+      "optional_bindings": ["min", "max", "thresholds", "inverse"],
+      "renderer_file": "dashboard/panels/gauge.py",
+      "echarts_type": "gauge"
+    },
+    "heatmap": {
+      "description": "物资×模型热力图",
+      "required_bindings": ["x_axis", "y_axis", "metric"],
+      "renderer_file": "dashboard/panels/heatmap.py",
+      "echarts_type": "heatmap"
+    }
+  },
+  "integration": {
+    "main_py_insertions": {
+      "total": "5个插入点，约15行代码",
+      "points": [
+        {"id": 1, "location": "文件头部", "lines": 4, "purpose": "安全导入（try/except ImportError）"},
+        {"id": 2, "location": "argparse部分", "lines": 4, "purpose": "新增--no-dashboard等4个命令行参数"},
+        {"id": 3, "location": "预测主循环开始前", "lines": 3, "purpose": "初始化collector + set_meta"},
+        {"id": 4, "location": "每个模型预测完成后", "lines": 2, "purpose": "collector.collect(material, model, result)"},
+        {"id": 5, "location": "全部预测完成后", "lines": 4, "purpose": "DashboardBuilder(...).build()"}
+      ]
+    },
+    "cli_args": [
+      {"name": "--no-dashboard", "type": "flag", "default": false, "description": "禁用看板生成"},
+      {"name": "--dashboard-config", "type": "str", "default": null, "description": "指定配置文件路径"},
+      {"name": "--dashboard-output", "type": "str", "default": null, "description": "指定输出路径（默认output/dashboard.html）"},
+      {"name": "--dashboard-debug", "type": "flag", "default": false, "description": "同时输出dashboard_data.json用于调试"}
+    ],
+    "three_output_shared": "PNG绘图、日志输出、Dashboard三输出共享同一all_results数据源",
+    "safety": "collector.collect()内部try/except保护，任何异常仅warnings.warn，不中断主预测循环"
+  },
+  "error_handling": {
+    "panel_level": "每个panel独立try/except，失败时降级为错误占位div（.panel-error）",
+    "module_import": "panels/__init__.py自动导入，单个模块失败仅警告不影响其他",
+    "echarts_init": "每个IIFE内try/catch，初始化失败显示错误文本",
+    "builder_level": "DashboardBuilder.build()外层try/except，失败不中断主预测流程",
+    "collector_level": "collect()内部try/except，异常仅记录警告",
+    "empty_data": "collector.materials为空时跳过看板生成"
+  },
+  "materials": {
+    "current": ["交流避雷器", "电容式电压互感器", "交流支柱绝缘子", "断路器保护", "电抗器保护"],
+    "count": 5,
+    "dynamic": true,
+    "source": "main.py运行时确定，由collector自动收集"
+  },
+  "models": {
+    "count": 15,
+    "dynamic": true,
+    "source": "main.py运行时确定",
+    "examples": ["LSTM", "GRU", "Transformer"]
+  },
+  "metrics": {
+    "list": ["MSE", "RMSE", "MAE", "R2", "sMAPE", "MASE", "WRMSSE", "zero_acc", "sCRPS"],
+    "count": 9,
+    "primary": "R2（用于排名、热力图、最佳模型选取）"
+  },
+  "forecast": {
+    "horizon": 12,
+    "time_labels": ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"]
+  }
+}

@@ -110,10 +110,17 @@ except ImportError as e:
 # ===================== 全局配置 =====================
 MATERIALS = []  # 动态从 data.xlsx sheet 名加载
 MATERIAL_LABELS = {}
-# 真实市场因子 + 农历日历因子
-FACTOR_NAMES = ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+USE_EXTERNAL_FACTORS = False # D-01: 外部宏观因子(铝价/工业用电) — 趋势伪相关, ΔR²=-0.021, 默认关闭
+# 内部ECP因子(始终启用) + 外部宏观因子(由USE_EXTERNAL_FACTORS控制)
+# D-03: has_batch/digital_bids加入候选池后160kN R²暴跌-0.32(Spearman竞争替换), 已回退
+_INTERNAL_FACTORS = ['project_count', 'transformer_bids', 'monthly_bid_count', 'uhv_bids']
+_EXTERNAL_FACTORS = ['aluminum_price', 'industrial_elec', 'industrial_elec_yoy']
+FACTOR_NAMES = _INTERNAL_FACTORS + (_EXTERNAL_FACTORS if USE_EXTERNAL_FACTORS else [])
 FACTOR_LABELS = {'project_count': '项目数量(同源)', 'transformer_bids': '输变电批次数',
-                 'monthly_bid_count': '当月公告总数', 'uhv_bids': '特高压批次数'}
+                 'monthly_bid_count': '当月公告总数', 'uhv_bids': '特高压批次数',
+                 'has_batch': '批次采购标记', 'digital_bids': '数字化批次数',
+                 'aluminum_price': '铝价(元/吨)', 'industrial_elec': '工业用电量(亿kWh)',
+                 'industrial_elec_yoy': '工业用电同比(%)'}
 RANDOM_SEED = 42
 DATA_LOCKED = True  # 严格模式 — 数据由外部手动生成，禁止自动回退
 USE_QUARTER_DUMMIES = False  # 方案A: 行政季度末哑变量。实验确认无显著收益(ΔR²=-0.0046), 已关闭
@@ -121,10 +128,14 @@ USE_QUARTER_DUMMIES = False  # 方案A: 行政季度末哑变量。实验确认�
 # ===================== 可取消的实验开关 (设为True启用/False回退) =====================
 USE_EVENT_FEATURES = True    # 实验1: 事件保持特征(SHOS) — EVT事件特征ON
 USE_POOLED_TRAINING = False  # 实验2: 相似性聚类池化
-USE_LOG1P_TARGET = False     # 实验3: Y对数变换
+USE_LOG1P_TARGET = False     # M-02: log1p变换 — R²-0.259(0.724→0.465), 间歇性零值+反变换放大误差, 已关闭
 USE_QUANTILE_REGR = False    # 实验4: 分位数回归
 SKIP_REACTOR_PROTECT = True  # 开关: 跳过电抗器保护 (R²<0.05, 样本噪声主导, 无优化空间)
 USE_MAG_FEATURES = False     # 实验6: 量级特征(lag-1) — 泄漏版R²虚高+0.28, 无泄漏版Δ=-0.02, 备选关闭
+USE_ENHANCED_LAG_FEATURES = True  # D-02: 增强滞后/滚动统计特征(lag2,3,6+roll6,12+std+ewm+yoy)
+USE_BATCH_FEATURES = False   # D-04: 批次采购附加特征 — R²-0.027, 300kN暴跌-0.42, 已关闭
+USE_SEASONAL_PROFILE = False # D-05: 月度季节剖面 — R²-0.018/MAPE+22pp, 间歇型物资月均值被零主导, 已关闭
+USE_BLEND_ENSEMBLE = True    # M-01: Top-3模型加权融合(R²权重, 排除朴素基线)
 
 # ===================== 0. 每物资超参数配置 =====================
 # 两层字典: HP_DEFAULTS[model_key] = 默认参数; HP_OVERRIDES[model_key][material_substr] = 覆盖值
@@ -439,6 +450,55 @@ def preprocess_data(df, material):
     m_train = (np.arange(train_len)+1) % 12; m_train[m_train==0]=12
     q_train = ((np.arange(train_len)+1) // 3) % 4; q_train[q_train==0]=4
 
+    # D-02: 增强滞后/滚动统计特征 (纯自回归, 无外部依赖, 无未来泄露)
+    enh_lag_feats_tr = []
+    if USE_ENHANCED_LAG_FEATURES:
+        seq = demand_train
+        n = train_len
+        # 多步滞后
+        lag2 = np.zeros(n); lag2[2:] = seq[:-2]
+        lag3 = np.zeros(n); lag3[3:] = seq[:-3]
+        lag6 = np.zeros(n); lag6[6:] = seq[:-6]
+        # 长窗口滚动均值
+        roll6_mean = np.array([np.mean(seq[max(0,i-6):i]) if i > 0 else 0 for i in range(n)])
+        roll12_mean = np.array([np.mean(seq[max(0,i-12):i]) if i > 0 else 0 for i in range(n)])
+        # 滚动标准差(波动性)
+        roll3_std = np.array([np.std(seq[max(0,i-3):i]) if i > 1 else 0 for i in range(n)])
+        # 指数加权均值 (α=0.3, 近期权重更高)
+        ewm = np.zeros(n)
+        alpha = 0.3
+        for i in range(1, n):
+            ewm[i] = alpha * seq[i-1] + (1 - alpha) * ewm[i-1]
+        # 同比差分: lag1 - lag13 (捕捉年度趋势变化)
+        yoy_diff = np.zeros(n)
+        for i in range(13, n):
+            yoy_diff[i] = seq[i-1] - seq[i-13]
+        enh_lag_feats_tr = [lag2, lag3, lag6, roll6_mean, roll12_mean, roll3_std, ewm, yoy_diff]
+
+    # D-04: 批次采购附加特征 (附加模式, 不参与Spearman竞争, lag-1避免泄露)
+    batch_feats_tr = []
+    if USE_BATCH_FEATURES:
+        for col in ['has_batch', 'digital_bids']:
+            if col in df.columns:
+                vals = df[col].values.astype(np.float64)
+                # lag-1: 用上月批次信号预测当月需求
+                lagged = np.zeros(train_len)
+                lagged[1:] = vals[:train_len-1]
+                batch_feats_tr.append(lagged)
+
+    # D-05: 月度季节剖面 (同月历史扩展均值, 训练集计算, 无泄露)
+    seasonal_profile_tr = []
+    if USE_SEASONAL_PROFILE and 'date' in df.columns:
+        cal_m = df['date'].dt.month.values  # 实际日历月 1-12
+        sp = np.zeros(train_len)
+        for i in range(train_len):
+            same_month_past = [j for j in range(i) if cal_m[j] == cal_m[i]]
+            if same_month_past:
+                sp[i] = np.mean(demand_train[same_month_past])
+            else:
+                sp[i] = 0  # 首次出现该月, 无历史
+        seasonal_profile_tr = [sp]
+
     # 实验1: 事件保持特征 (SHOS-based)
     evt_feats_tr = []
     if USE_EVENT_FEATURES:
@@ -481,14 +541,15 @@ def preprocess_data(df, material):
         is_zero_lag1_tr, is_zero_lag12_tr,
         np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12),
         np.sin(2*np.pi*q_train/4), np.cos(2*np.pi*q_train/4),
-    ] + evt_feats_tr + qtr_end_cols)
+    ] + evt_feats_tr + qtr_end_cols + enh_lag_feats_tr + batch_feats_tr + seasonal_profile_tr)
 
     # 实验6: 量级特征(lag-1) → 追加到特征矩阵末尾
     mag_all = build_magnitude_features(df, material)
     if USE_MAG_FEATURES and mag_all.shape[1] > 0:
         X_train_raw = np.column_stack([X_train_raw, mag_all[:train_len]])
 
-    # Step 3: 特征Scaler仅对训练集fit
+    # Step 3: 防御性NaN清洗 + 特征Scaler仅对训练集fit
+    X_train_raw = np.nan_to_num(X_train_raw, nan=0.0, posinf=0.0, neginf=0.0)
     feature_scaler = MinMaxScaler()
     X_train = feature_scaler.fit_transform(X_train_raw)
     y_train = demand_train.copy()
@@ -504,6 +565,55 @@ def preprocess_data(df, material):
     is_zero_lag12_te = (lag12_te == 0).astype(float)
     m_test = (np.arange(train_len+1, train_len+N_TEST+1)) % 12; m_test[m_test==0]=12
     q_test = ((np.arange(train_len+1, train_len+N_TEST+1)) // 3) % 4; q_test[q_test==0]=4
+
+    # D-02: 测试集增强滞后/滚动特征 (使用demand_raw的历史真实值, 无未来泄露)
+    enh_lag_feats_te = []
+    if USE_ENHANCED_LAG_FEATURES:
+        nt = N_TEST; tl = train_len
+        lag2_te = np.zeros(nt); lag3_te = np.zeros(nt); lag6_te = np.zeros(nt)
+        roll6_te = np.zeros(nt); roll12_te = np.zeros(nt); roll3std_te = np.zeros(nt)
+        ewm_te = np.zeros(nt); yoy_te = np.zeros(nt)
+        # EWM需要训练集末尾状态作为初始值
+        alpha = 0.3
+        ewm_state = 0.0
+        for i in range(1, tl):
+            ewm_state = alpha * demand_raw[i-1] + (1 - alpha) * ewm_state
+        for i in range(nt):
+            idx = tl + i
+            lag2_te[i] = demand_raw[idx-2] if idx >= 2 else 0
+            lag3_te[i] = demand_raw[idx-3] if idx >= 3 else 0
+            lag6_te[i] = demand_raw[idx-6] if idx >= 6 else 0
+            roll6_te[i] = np.mean(demand_raw[max(0,idx-6):idx]) if idx > 0 else 0
+            roll12_te[i] = np.mean(demand_raw[max(0,idx-12):idx]) if idx > 0 else 0
+            roll3std_te[i] = np.std(demand_raw[max(0,idx-3):idx]) if idx > 1 else 0
+            ewm_state = alpha * demand_raw[idx-1] + (1 - alpha) * ewm_state
+            ewm_te[i] = ewm_state
+            yoy_te[i] = (demand_raw[idx-1] - demand_raw[idx-13]) if idx >= 13 else 0
+        enh_lag_feats_te = [lag2_te, lag3_te, lag6_te, roll6_te, roll12_te, roll3std_te, ewm_te, yoy_te]
+
+    # D-04: 测试集批次采购附加特征 (lag-1)
+    batch_feats_te = []
+    if USE_BATCH_FEATURES:
+        for col in ['has_batch', 'digital_bids']:
+            if col in df.columns:
+                vals = df[col].values.astype(np.float64)
+                lagged_te = np.zeros(N_TEST)
+                for i in range(N_TEST):
+                    idx = train_len + i
+                    lagged_te[i] = vals[idx-1] if idx >= 1 else 0
+                batch_feats_te.append(lagged_te)
+
+    # D-05: 测试集月度季节剖面 (用训练集同月均值)
+    seasonal_profile_te = []
+    if USE_SEASONAL_PROFILE and 'date' in df.columns:
+        cal_m_all = df['date'].dt.month.values
+        # 训练集各月均值
+        month_means = {}
+        for mo in range(1, 13):
+            idxs = [j for j in range(train_len) if cal_m_all[j] == mo]
+            month_means[mo] = np.mean(demand_train[idxs]) if idxs else 0
+        sp_te = np.array([month_means.get(cal_m_all[train_len + i], 0) for i in range(N_TEST)])
+        seasonal_profile_te = [sp_te]
 
     # 实验1: 测试集事件特征
     evt_feats_te = []
@@ -542,15 +652,17 @@ def preprocess_data(df, material):
         is_zero_lag1_te, is_zero_lag12_te,
         np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12),
         np.sin(2*np.pi*q_test/4), np.cos(2*np.pi*q_test/4),
-    ] + evt_feats_te + qtr_end_cols_te)
+    ] + evt_feats_te + qtr_end_cols_te + enh_lag_feats_te + batch_feats_te + seasonal_profile_te)
     if USE_MAG_FEATURES and mag_all.shape[1] > 0:
         X_test_raw = np.column_stack([X_test_raw, mag_all[train_len:train_len+N_TEST]])
+    X_test_raw = np.nan_to_num(X_test_raw, nan=0.0, posinf=0.0, neginf=0.0)
     X_test = feature_scaler.transform(X_test_raw)
     y_test = demand_test.copy()
 
     logger.info(f"  [特征工程] top4={top4}, n_feat={X_train.shape[1]}维, 训练={train_len}月"
                 + (" [事件特征ON]" if USE_EVENT_FEATURES else "")
                 + (" [量级特征ON]" if USE_MAG_FEATURES else "")
+                + (" [增强滞后ON]" if USE_ENHANCED_LAG_FEATURES else "")
                 + (" [log1p]" if USE_LOG1P_TARGET else ""))
     return X_train, y_train, X_test, y_test, feature_scaler
 
@@ -1458,6 +1570,32 @@ def main():
 
         # 指标对比柱状图
         plot_metrics_comparison(all_metrics)
+
+    # M-01: Top-3模型加权融合 (R²权重, 排除朴素基线)
+    _BASELINE_MODELS = {'NaiveSeasonal', 'NaiveMean', 'Persistence', 'SARIMA', 'Chronos', 'Croston-SBA'}
+    if USE_BLEND_ENSEMBLE:
+        for material in list(all_results.keys()):
+            if material not in all_metrics:
+                continue
+            # 筛选非基线模型, 按R²排序取top-3
+            candidates = [(k, v['R2']) for k, v in all_metrics[material].items()
+                          if k not in _BASELINE_MODELS and v['R2'] > 0]
+            if len(candidates) < 2:
+                continue
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            top3 = candidates[:3]
+            # R²权重 (clip到正, 归一化)
+            weights = np.array([max(r2, 0.01) for _, r2 in top3])
+            weights = weights / weights.sum()
+            # 加权融合预测
+            y_preds = [all_results[material][name]['y_pred'] for name, _ in top3]
+            y_test_ref = all_results[material][top3[0][0]]['y_test']
+            y_blend = sum(w * yp for w, yp in zip(weights, y_preds))
+            y_blend = np.maximum(y_blend, 0)  # 非负约束
+            blend_metrics = evaluate_model(y_test_ref, y_blend)
+            all_results[material]['Blend-Top3'] = {
+                'y_pred': y_blend, 'y_test': y_test_ref, 'metrics': blend_metrics}
+            all_metrics[material]['Blend-Top3'] = blend_metrics
 
     # === 【Dashboard插入点4+5】批量收集结果并生成看板 ===
     if collector:

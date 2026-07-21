@@ -1,0 +1,41 @@
+{
+  "range": "201911-202607",
+  "total_months": 81,
+  "selection_criteria": {
+    "highfreq": "n_nz>=40, total>500 (相对高频/连续型)",
+    "trend": "|trend_corr|>0.3, n_nz>=25 (趋势型)",
+    "pulse": "pulse_ratio>8, n_nz>=25 (脉冲型)",
+    "intermittent": "zero_rate>=0.55, n_nz>=15, total>100 (间歇型)"
+  },
+  "materials_by_type": {
+    "highfreq": [
+      "交流避雷器",
+      "电容式电压互感器",
+      "交流支柱绝缘子",
+      "断路器保护",
+      "电抗器保护"
+    ],
+    "trend": [
+      "控制电缆",
+      "防误闭锁系统",
+      "智能变电站防误闭锁系统",
+      "级联型静止无功发生器（SVG）",
+      "10kV三相油浸分体式并联电抗器"
+    ],
+    "pulse": [
+      "PTN电接口模块",
+      "电容器组串联电抗器",
+      "地线用盘形悬式瓷绝缘子",
+      "电容器保护",
+      "PTN光接口模块"
+    ],
+    "intermittent": [
+      "330kV油浸电磁CT",
+      "160kN单联双线夹地线悬垂串",
+      "70kN双联地线耐张串",
+      "300kN双联双挂点V型预绞单线夹750kV导线悬垂串",
+      "OPGW"
+    ]
+  },
+  "short_name_map": {}
+}
