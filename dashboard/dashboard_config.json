@@ -91,7 +91,7 @@
         "series": "$.results.${material}.*.y_pred",
         "y_test": "$.results.${material}.__y_test__",
         "x_axis": "$.meta.time_labels",
-        "top_n": 15,
+        "top_n": 7,
         "rank_by": "R2"
       },
       "options": {
@@ -146,6 +146,50 @@
         "show_value": true,
         "color": "#722ed1",
         "sort": "asc"
+      }
+    },
+    {
+      "id": "material_model_rank_${material_id}",
+      "type": "metrics_rank_table",
+      "title": "${material} - 模型效果排名 Top-7",
+      "repeat": {
+        "foreach": "$.meta.materials",
+        "as": "material",
+        "id_suffix": "material_id"
+      },
+      "grid": {"col": 1, "row": "auto", "col_span": 6, "row_span": 3},
+      "data_binding": {
+        "dimension": "material",
+        "target": "${material}",
+        "top_n": 7,
+        "rank_by": "R2"
+      },
+      "options": {
+        "metrics": ["R2", "sMAPE", "RMSE", "MAE"],
+        "metric_labels": {"R2": "R²", "sMAPE": "sMAPE", "RMSE": "RMSE", "MAE": "MAE"},
+        "highlight_top": 3
+      }
+    },
+    {
+      "id": "model_material_rank_${model_id}",
+      "type": "metrics_rank_table",
+      "title": "${model} - 物资效果排名 Top-7",
+      "repeat": {
+        "foreach": "$.meta.models",
+        "as": "model",
+        "id_suffix": "model_id"
+      },
+      "grid": {"col": 1, "row": "auto", "col_span": 6, "row_span": 3},
+      "data_binding": {
+        "dimension": "model",
+        "target": "${model}",
+        "top_n": 7,
+        "rank_by": "R2"
+      },
+      "options": {
+        "metrics": ["R2", "sMAPE", "RMSE", "MAE"],
+        "metric_labels": {"R2": "R²", "sMAPE": "sMAPE", "RMSE": "RMSE", "MAE": "MAE"},
+        "highlight_top": 3
       }
     }
   ]
