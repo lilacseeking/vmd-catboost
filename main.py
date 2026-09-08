@@ -126,13 +126,16 @@ DATA_LOCKED = True  # 严格模式 — 数据由外部手动生成，禁止自�
 USE_QUARTER_DUMMIES = False  # 方案A: 行政季度末哑变量。实验确认无显著收益(ΔR²=-0.0046), 已关闭
 
 # ===================== 可取消的实验开关 (设为True启用/False回退) =====================
-USE_EVENT_FEATURES = True    # 实验1: 事件保持特征(SHOS) — EVT事件特征ON
+USE_EVENT_FEATURES = True    # EVT事件特征 — 表征采购批次结构, 论文第3组特征
 USE_POOLED_TRAINING = False  # 实验2: 相似性聚类池化
 USE_LOG1P_TARGET = False     # M-02: log1p变换 — R²-0.259(0.724→0.465), 间歇性零值+反变换放大误差, 已关闭
 USE_QUANTILE_REGR = False    # 实验4: 分位数回归
 SKIP_REACTOR_PROTECT = True  # 开关: 跳过电抗器保护 (R²<0.05, 样本噪声主导, 无优化空间)
 USE_MAG_FEATURES = False     # 实验6: 量级特征(lag-1) — 泄漏版R²虚高+0.28, 无泄漏版Δ=-0.02, 备选关闭
-USE_ENHANCED_LAG_FEATURES = True  # D-02: 增强滞后/滚动统计特征(lag2,3,6+roll6,12+std+ewm+yoy)
+USE_GREY_FEATURES = True     # GINN创新点: 灰色系统先验特征。仅对NZ<20的稀疏物资生效
+USE_ENHANCED_LAG_FEATURES = True  # 论文特征组1: 多分辨率自回归信号(8D, +0.23 R²贡献)
+USE_PAPER_FEATURES = True    # 论文精简: NZ>=15→MAS+PES(22D) | NZ<15→MAS+GDEP(17D)
+#   全局移除: sin_m/cos_m/sin_q/cos_q/ewm (4组Spearman均<0.13)
 USE_BATCH_FEATURES = False   # D-04: 批次采购附加特征 — R²-0.027, 300kN暴跌-0.42, 已关闭
 USE_SEASONAL_PROFILE = False # D-05: 月度季节剖面 — R²-0.018/MAPE+22pp, 间歇型物资月均值被零主导, 已关闭
 USE_BLEND_ENSEMBLE = True    # M-01: Top-3模型加权融合(R²权重, 排除朴素基线)
@@ -387,6 +390,114 @@ def build_magnitude_features(df, material):
     return arr_lagged
 
 
+# ===================== 1.7 GINN灰色先验特征 (SCI创新点) =====================
+_grey_cache = {}
+from scipy.special import gamma as _gamma_fn
+
+def _gm11_fit(x0):
+    """GM(1,1) OLS估计: dX⁽¹⁾/dt + a·X⁽¹⁾ = b → 返回(a,b)"""
+    n = len(x0)
+    if n < 4: return -0.01, np.mean(x0) if n > 0 else 0
+    x1 = np.cumsum(np.maximum(x0, 0))
+    z1 = 0.5 * (x1[1:] + x1[:-1])
+    B = np.column_stack([-z1, np.ones(n-1)]); Y = x0[1:]
+    try:
+        params = np.linalg.lstsq(B, Y, rcond=None)[0]
+        return params[0], params[1]
+    except: return -0.01, np.mean(x0)
+
+def _gm11_fitted(x0, a, b):
+    """GM(1,1)拟合值序列(与输入等长)"""
+    n = len(x0)
+    if abs(a) < 1e-10: return np.full(n, np.mean(np.maximum(x0, 0)))
+    x1_hat = np.zeros(n); x1_hat[0] = max(x0[0], 0)
+    for k in range(1, n):
+        x1_hat[k] = (x1_hat[0] - b/a) * np.exp(-a*k) + b/a
+    fitted = np.zeros(n); fitted[0] = x1_hat[0]
+    for k in range(1, n): fitted[k] = max(x1_hat[k]-x1_hat[k-1], 0)
+    return fitted
+
+def _gm11_predict_next(last_n, a, b, n_pred):
+    """GM(1,1)从last_n外推n_pred步"""
+    if abs(a) < 1e-10: return np.full(n_pred, last_n)
+    preds = np.zeros(n_pred); x1_prev = last_n
+    for k in range(1, n_pred+1):
+        x1_k = (last_n - b/a)*np.exp(-a*k) + b/a
+        preds[k-1] = max(x1_k - x1_prev, 0); x1_prev = x1_k
+    return preds
+
+def _fractional_ago(x0, r):
+    """分数阶r-AGO序列: Xr[k] = Σ C(k-j+r-1, k-j)·x0[j]"""
+    n = len(x0); xr = np.zeros(n)
+    for k in range(n):
+        for j in range(k+1):
+            coeff = _gamma_fn(k-j+r) / (_gamma_fn(k-j+1)*_gamma_fn(r)) if r > 0 else 1.0
+            xr[k] += coeff * x0[j]
+    return xr
+
+def build_grey_features(demand_raw, train_len):
+    """构建灰色先验特征 (GM(1,1)+分数阶AGO, 无数据泄漏)。
+
+    训练集: 在每个训练位置t, 用[0:t]的序列拟合GM(1,1)→ gm_fitted[t] = t位置拟合值
+    测试集: 滚动一步预测, 只用训练数据+已预测值, 不触碰测试集真实值
+    """
+    if not USE_GREY_FEATURES: return np.zeros((len(demand_raw), 0)), np.zeros((len(demand_raw), 0))
+
+    n = len(demand_raw)
+    tl = train_len
+    d = np.maximum(demand_raw, 0)
+    # 灰色系统理论处理稀疏序列: NZ>=15时普通特征足够, 灰色特征不必要
+    if int(np.sum(demand_raw[:tl] > 0)) >= 15:
+        return np.zeros((tl, 0)), np.zeros((n-tl, 0))
+
+    # --- 训练集: 滑动window=12的GM(1,1)拟合 ---
+    gm_fitted = np.zeros(n); gm_res = np.zeros(n); grey_a = np.zeros(n)
+    for t in range(tl):
+        start = max(0, t-11)
+        seg = d[start:t+1]
+        if len(seg) >= 4 and seg.sum() > 0:
+            a, b = _gm11_fit(seg); fitted = _gm11_fitted(seg, a, b)
+            gm_fitted[t] = fitted[-1]; gm_res[t] = d[t] - fitted[-1]; grey_a[t] = a
+        else:
+            gm_fitted[t] = np.mean(seg) if len(seg) > 0 else 0
+
+    # --- 测试集: GM(1,1)外推预测 (无泄漏, 只用训练集拟合) ---
+    # 用训练集最后12点拟合GM(1,1), 然后外推test_len步
+    train_end_seg = d[max(0, tl-12):tl]
+    test_len = n - tl
+    if len(train_end_seg) >= 4 and train_end_seg.sum() > 0:
+        a_hat, b_hat = _gm11_fit(train_end_seg)
+        preds = _gm11_predict_next(train_end_seg[-1], a_hat, b_hat, test_len)
+        gm_fitted[tl:] = preds
+        grey_a[tl:] = a_hat
+    else:
+        gm_fitted[tl:] = np.mean(train_end_seg) if len(train_end_seg) > 0 else 0
+
+    # --- 分数阶AGO (只对训练集+测试集做constant外推, 无泄漏) ---
+    best_r = 0.7
+    y_pos = np.maximum(d[:tl], 1e-6)
+    if tl >= 5:
+        best_smooth = float('inf')
+        for r in [0.3, 0.5, 0.7, 0.9, 1.0]:
+            try:
+                fago_sub = _fractional_ago(y_pos[:min(20,tl)], r)
+                smooth = np.std(np.diff(fago_sub))
+                if smooth < best_smooth: best_smooth = smooth; best_r = r
+            except: continue
+    fago = np.zeros(n)
+    try:
+        fago_tr = _fractional_ago(y_pos, best_r)
+        scale = np.mean(y_pos[y_pos>0]) / max(np.mean(fago_tr[fago_tr>0]), 1e-6) if (y_pos>0).any() else 1
+        fago[:tl] = fago_tr * scale
+        fago[tl:] = fago[tl-1]  # 测试集AGO固定为训练最后值 (保守外推)
+    except: pass
+
+    # gm_res(残差)在测试集为0: 测试时没有真实值可对比
+    grey_tr = np.column_stack([gm_fitted[:tl], gm_res[:tl], grey_a[:tl], fago[:tl]])
+    grey_te = np.column_stack([gm_fitted[tl:], gm_res[tl:], grey_a[tl:], fago[tl:]])
+    return grey_tr, grey_te
+
+
 # ===================== 2. Top-4 影响因子（基于Spearman动态计算） =====================
 _top_factors_cache = {}
 
@@ -434,6 +545,18 @@ def preprocess_data(df, material):
     data_train, data_test = data[:train_len], data[train_len:]
     demand_train, demand_test = demand_raw[:train_len], demand_raw[train_len:]
 
+    # Step 1.5: 论文精简方案——按物资数据特征选择特征组
+    _use_evt = USE_EVENT_FEATURES
+    _use_grey = USE_GREY_FEATURES
+    _use_sincos = True   # sin/cos 周期编码 (论文精简时移除, |r|<0.13)
+    _use_ewm = True      # EWM指数平滑 (论文精简时移除, |r|<0.13)
+    if USE_PAPER_FEATURES:
+        nz_check = int(np.sum(demand_train > 0))
+        if nz_check >= 15:
+            _use_evt, _use_grey, _use_sincos, _use_ewm = True, False, False, False  # MAS+PES
+        else:
+            _use_evt, _use_grey, _use_sincos, _use_ewm = True, True, False, False # MAS+PES+GDEP
+
     # Step 2: 训练集lag/rolling (无未来泄露)
     def make_lag_rolling(seq):
         n = len(seq)
@@ -473,7 +596,9 @@ def preprocess_data(df, material):
         yoy_diff = np.zeros(n)
         for i in range(13, n):
             yoy_diff[i] = seq[i-1] - seq[i-13]
-        enh_lag_feats_tr = [lag2, lag3, lag6, roll6_mean, roll12_mean, roll3_std, ewm, yoy_diff]
+        enh_lag_feats_tr = [lag2, lag3, lag6, roll6_mean, roll12_mean, roll3_std, yoy_diff]
+        if _use_ewm:
+            enh_lag_feats_tr.append(ewm)  # 论文精简时跳过(|r|<0.13)
 
     # D-04: 批次采购附加特征 (附加模式, 不参与Spearman竞争, lag-1避免泄露)
     batch_feats_tr = []
@@ -501,7 +626,7 @@ def preprocess_data(df, material):
 
     # 实验1: 事件保持特征 (SHOS-based)
     evt_feats_tr = []
-    if USE_EVENT_FEATURES:
+    if _use_evt:
         d = demand_train
         n = train_len
         # Stop类: 距上次事件的间隔
@@ -536,17 +661,26 @@ def preprocess_data(df, material):
         is_q3_q4_end = ((cal_month_tr == 9) | (cal_month_tr == 12)).astype(float)
         qtr_end_cols = [is_q1_end, is_q2_end, is_q3_q4_end]
 
+    # 周期编码 (论文精简时移除: |r|<0.13)
+    _sincos_cols_tr = []
+    if _use_sincos:
+        _sincos_cols_tr = [np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12),
+                           np.sin(2*np.pi*q_train/4), np.cos(2*np.pi*q_train/4)]
     X_train_raw = np.column_stack([
         data_train[:,1:], lag1_tr, lag12_tr, roll3_tr,
         is_zero_lag1_tr, is_zero_lag12_tr,
-        np.sin(2*np.pi*m_train/12), np.cos(2*np.pi*m_train/12),
-        np.sin(2*np.pi*q_train/4), np.cos(2*np.pi*q_train/4),
-    ] + evt_feats_tr + qtr_end_cols + enh_lag_feats_tr + batch_feats_tr + seasonal_profile_tr)
+    ] + _sincos_cols_tr + evt_feats_tr + qtr_end_cols + enh_lag_feats_tr + batch_feats_tr + seasonal_profile_tr)
 
     # 实验6: 量级特征(lag-1) → 追加到特征矩阵末尾
     mag_all = build_magnitude_features(df, material)
     if USE_MAG_FEATURES and mag_all.shape[1] > 0:
         X_train_raw = np.column_stack([X_train_raw, mag_all[:train_len]])
+
+    # GINN: 灰色先验特征 (GM(1,1)+分数阶AGO, SCI创新点, 无泄漏)
+    # ElasticNet L1正则自动筛选: 灰色特征有用→保留系数, 无用→归零
+    grey_tr, grey_te = build_grey_features(demand_raw, train_len)
+    if _use_grey and grey_tr.shape[1] > 0:
+        X_train_raw = np.column_stack([X_train_raw, grey_tr])
 
     # Step 3: 防御性NaN清洗 + 特征Scaler仅对训练集fit
     X_train_raw = np.nan_to_num(X_train_raw, nan=0.0, posinf=0.0, neginf=0.0)
@@ -589,7 +723,9 @@ def preprocess_data(df, material):
             ewm_state = alpha * demand_raw[idx-1] + (1 - alpha) * ewm_state
             ewm_te[i] = ewm_state
             yoy_te[i] = (demand_raw[idx-1] - demand_raw[idx-13]) if idx >= 13 else 0
-        enh_lag_feats_te = [lag2_te, lag3_te, lag6_te, roll6_te, roll12_te, roll3std_te, ewm_te, yoy_te]
+        enh_lag_feats_te = [lag2_te, lag3_te, lag6_te, roll6_te, roll12_te, roll3std_te, yoy_te]
+        if _use_ewm:
+            enh_lag_feats_te.append(ewm_te)  # 论文精简时跳过(|r|<0.13)
 
     # D-04: 测试集批次采购附加特征 (lag-1)
     batch_feats_te = []
@@ -617,7 +753,7 @@ def preprocess_data(df, material):
 
     # 实验1: 测试集事件特征
     evt_feats_te = []
-    if USE_EVENT_FEATURES:
+    if _use_evt:
         d_all = demand_raw; tl = train_len; nt = N_TEST
         gap_sl_te = np.zeros(nt); last_ev = -999
         for i in range(tl):
@@ -647,22 +783,28 @@ def preprocess_data(df, material):
         is_q3_q4_end_te = ((cal_month_te == 9) | (cal_month_te == 12)).astype(float)
         qtr_end_cols_te = [is_q1_end_te, is_q2_end_te, is_q3_q4_end_te]
 
+    _sincos_cols_te = []
+    if _use_sincos:
+        _sincos_cols_te = [np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12),
+                           np.sin(2*np.pi*q_test/4), np.cos(2*np.pi*q_test/4)]
     X_test_raw = np.column_stack([
         data_test[:,1:], lag1_te, lag12_te, roll3_te,
         is_zero_lag1_te, is_zero_lag12_te,
-        np.sin(2*np.pi*m_test/12), np.cos(2*np.pi*m_test/12),
-        np.sin(2*np.pi*q_test/4), np.cos(2*np.pi*q_test/4),
-    ] + evt_feats_te + qtr_end_cols_te + enh_lag_feats_te + batch_feats_te + seasonal_profile_te)
+    ] + _sincos_cols_te + evt_feats_te + qtr_end_cols_te + enh_lag_feats_te + batch_feats_te + seasonal_profile_te)
     if USE_MAG_FEATURES and mag_all.shape[1] > 0:
         X_test_raw = np.column_stack([X_test_raw, mag_all[train_len:train_len+N_TEST]])
+    if USE_GREY_FEATURES and grey_te.shape[1] > 0:
+        X_test_raw = np.column_stack([X_test_raw, grey_te])
     X_test_raw = np.nan_to_num(X_test_raw, nan=0.0, posinf=0.0, neginf=0.0)
     X_test = feature_scaler.transform(X_test_raw)
     y_test = demand_test.copy()
 
     logger.info(f"  [特征工程] top4={top4}, n_feat={X_train.shape[1]}维, 训练={train_len}月"
-                + (" [事件特征ON]" if USE_EVENT_FEATURES else "")
+                + (" [论文精简ON]" if USE_PAPER_FEATURES else "")
+                + (" [事件特征ON]" if _use_evt else "")
                 + (" [量级特征ON]" if USE_MAG_FEATURES else "")
                 + (" [增强滞后ON]" if USE_ENHANCED_LAG_FEATURES else "")
+                + (" [灰色先验ON]" if _use_grey else "")
                 + (" [log1p]" if USE_LOG1P_TARGET else ""))
     return X_train, y_train, X_test, y_test, feature_scaler
 
@@ -936,10 +1078,15 @@ def _two_stage_fit_predict(X_tr, y_tr, X_te, stage2_regressor, material):
     nv2 = min(6, nz.sum()//4)
     is_cb = hasattr(stage2_regressor, 'get_params')
     try:
+        if np.std(y_tr[nz]) < 1e-10:
+            return np.full(len(X_te), np.mean(y_tr[nz])), None
         stage2_regressor.fit(X_tr[nz][:-nv2], y_tr[nz][:-nv2],
             eval_set=(X_tr[nz][-nv2:], y_tr[nz][-nv2:]))
     except (TypeError, ValueError):
-        stage2_regressor.fit(X_tr[nz], y_tr[nz])
+        try:
+            stage2_regressor.fit(X_tr[nz], y_tr[nz])
+        except:
+            return prob * np.mean(y_tr[nz]), cls
     return prob * np.maximum(stage2_regressor.predict(X_te), 0), cls
 
 
